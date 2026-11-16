@@ -96,18 +96,27 @@ class SimulatedDriver(Driver):
     # ---- air -> RX -------------------------------------------------------
 
     def _deliver(self, frame: bytes) -> None:
-        """The RX tap: tally an ACK, then parse and hand one Packet to the sink."""
+        """The RX tap: tally an ACK, then parse and hand one Packet to the sink.
+
+        Control frames stop after the tally: the parser has no Packet for them (and an ACK is
+        shortened to 10 bytes by design), so passing one on would only feed garbage upward.
+        """
         self.record_ack(frame)
+        if len(frame) >= 2 and (frame[0] & 0x0C) >> 2 == 1:
+            return
         pkt = WlanFrameParser.parse_80211_frame(frame, rssi=-42)
         if pkt is not None and self._rx_cb is not None:
             self._rx_cb(pkt)
 
     def _publish(self, frames: List[bytes], delay: float = DELIVERY_DELAY) -> None:
-        """Hand ``frames`` to the air, after ``delay``, on the running loop."""
+        """Hand ``frames`` to the air, after ``delay``, on the running loop.
+
+        The air delivers through its own sink, so a ``close()`` (which detaches that sink) also
+        stops anything already queued from reaching the RX tap.
+        """
         if not frames or self._loop is None:
             return
-        for frame in frames:
-            self._loop.call_later(delay, self._deliver, frame)
+        self._loop.call_later(delay, self.radio.emit, frames)
 
     async def _beacon_loop(self) -> None:
         while not self._closed:
@@ -139,6 +148,11 @@ class SimulatedDriver(Driver):
         """Mirror of ``_enable_rx_acks``."""
 
     # ---- active monitor --------------------------------------------------
+
+    @property
+    def monitor_mac(self) -> Optional[bytes]:
+        """The MAC this air is currently answering as, or None outside active monitor."""
+        return self._monitor_mac
 
     async def enter_active_monitor(self, mac: bytes, bssid: Optional[bytes] = None) -> bytes:
         self._monitor_mac = bytes(mac)

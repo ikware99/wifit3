@@ -43,6 +43,26 @@ def pmkid_kde(value: bytes) -> bytes:
     return b"\xdd\x14\x00\x0f\xac\x04" + value
 
 
+def link_ack(ra: bytes) -> bytes:
+    """The 10-byte link-layer ACK the addressee sends back: FC 0xD4 + duration + RA.
+
+    Every unicast MPDU that reaches its addressee is ACKed at the MAC layer, whatever the frame
+    type. A campaign that counts ACKs (``WlanInterface.send_until_ack``) reads a missing ACK as
+    "the frame never arrived", so an air that stays silent makes every injection look lost.
+    """
+    return b"\xd4\x00" + b"\x00\x00" + bytes(ra)
+
+
+def _is_group(addr: bytes) -> bool:
+    """True for a group (broadcast/multicast) address: group frames are never ACKed."""
+    return bool(addr[0] & 0x01)
+
+
+def probe_resp(ap: "VirtualAccessPoint", client: bytes) -> bytes:
+    """A Probe Response: the beacon's own body behind a subtype-5 header addressed to ``client``."""
+    return mac_header(b"\x50\x00", client, ap.bssid_bytes, ap.bssid_bytes) + ap.beacon()[24:]
+
+
 def build_beacon(bssid: bytes, ssid: str, channel: int,
                  rsn_ie: Optional[bytes] = None) -> bytes:
     """A Beacon MPDU: fixed fields, then SSID / rates / DS param / optional RSN."""
@@ -77,10 +97,6 @@ class VirtualAccessPoint:
                                     rsn_ie_psk(self.akm) if self.akm else None)
 
     @property
-    def secured(self) -> bool:
-        return self.akm is not None
-
-    @property
     def sends_m1(self) -> bool:
         """Only a PSK AKM yields the harvestable M1; SAE would need a full SAE exchange."""
         return self.akm == 0x02
@@ -111,6 +127,13 @@ class VirtualRadio:
     def __post_init__(self) -> None:
         self._by_bssid: Dict[str, VirtualAccessPoint] = {
             ap.bssid.lower(): ap for ap in self.aps}
+        # Stations this air has actually heard from. A unicast frame is only ACKed by an addressee
+        # that exists, so de-authing an address nobody has talked to correctly draws silence.
+        self._stations: set[str] = set()
+
+    def add_station(self, mac: str) -> None:
+        """Put ``mac`` in range so unicast frames addressed to it are ACKed."""
+        self._stations.add(mac.lower())
 
     def add_ap(self, ap: VirtualAccessPoint) -> VirtualAccessPoint:
         self.aps.append(ap)
@@ -126,7 +149,11 @@ class VirtualRadio:
         return [ap.beacon() for ap in self.aps if channel is None or ap.channel == channel]
 
     def handle_tx(self, frame: bytes, channel: Optional[int] = None) -> List[bytes]:
-        """The frames the air answers a transmitted MPDU with (management frames only)."""
+        """The frames the air answers a transmitted MPDU with.
+
+        Order matters: the link-layer ACK comes first, because that is the order the air uses and
+        because ``send_until_ack`` only looks at whether anything ACKed the frame we just sent.
+        """
         if len(frame) < 24:
             return []
         fc0 = frame[0]
@@ -134,18 +161,33 @@ class VirtualRadio:
             return []
         subtype = (fc0 & 0xF0) >> 4
         dest, source = frame[4:10], frame[10:16]
-        ap = self._by_bssid.get(dest.hex(":"))
-        if ap is None or (channel is not None and ap.channel != channel):
-            return []
+        dest_str = dest.hex(":")
+
+        if subtype == 4:                     # Probe Request: every AP on this channel answers
+            self._stations.add(source.hex(":"))
+            return [probe_resp(ap, source)
+                    for ap in self.aps if channel is None or ap.channel == channel]
+
+        ap = self._by_bssid.get(dest_str)
+        if ap is not None and channel is not None and ap.channel != channel:
+            return []                        # tuned away: the addressee never heard it
+
+        # Every unicast MPDU that reaches its addressee draws a link ACK. Without this a de-auth
+        # (subtype 12, which no state machine answers) looks like a dead AP to any ACK-measuring
+        # campaign, and the UI reports "silent AP & client" against a radio that answers.
+        reachable = ap is not None or dest_str in self._stations
+        replies = [link_ack(source)] if reachable and not _is_group(dest) else []
+        if ap is None:
+            return replies
+        self._stations.add(source.hex(":"))
         if subtype == 11:                    # Authentication
-            return [auth_resp(ap.bssid_bytes, source)]
-        if subtype in (0, 2):                # (Re)Association Request
-            replies = [assoc_resp(ap.bssid_bytes, source, channel=ap.channel,
-                                  twin_beacon=ap.beacon())]
+            replies.append(auth_resp(ap.bssid_bytes, source))
+        elif subtype in (0, 2):              # (Re)Association Request
+            replies.append(assoc_resp(ap.bssid_bytes, source, channel=ap.channel,
+                                      twin_beacon=ap.beacon(), reassoc=subtype == 2))
             if ap.sends_m1:
                 replies.append(ap.m1(source))
-            return replies
-        return []
+        return replies
 
     def emit(self, frames: List[bytes]) -> int:
         """Push ``frames`` into the RX tap; returns how many were handed over."""

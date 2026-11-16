@@ -55,15 +55,20 @@ def test_beacon_parses_with_its_ssid_channel_and_akm():
     assert pkt.rsn_valid is True
 
 
-def test_psk_ap_answers_auth_then_assoc_with_m1():
+def test_psk_ap_acks_auth_then_answers_assoc_with_m1():
     ap = VirtualAccessPoint(ssid="psk", bssid="02:00:5e:1a:00:0a", channel=6)
     radio = VirtualRadio(aps=[ap])
     client = str_to_mac("02:11:22:33:44:55")
     auth = mac_header(b"\xb0\x00", ap.bssid_bytes, client, ap.bssid_bytes) + b"\x00\x00\x02\x00\x00\x00"
-    assert len(radio.handle_tx(auth, channel=6)) == 1
-    replies = radio.handle_tx(_assoc_req(ap.bssid, "02:11:22:33:44:55"), channel=6)
+    replies = radio.handle_tx(auth, channel=6)
+    # The link ACK comes first and goes back to whoever transmitted, not to the AP.
+    assert replies[0][0] == 0xD4
+    assert replies[0][4:10] == client
     assert len(replies) == 2
-    m1 = WlanFrameParser.parse_80211_frame(replies[1], rssi=-40)
+    replies = radio.handle_tx(_assoc_req(ap.bssid, "02:11:22:33:44:55"), channel=6)
+    assert replies[0][0] == 0xD4
+    assert len(replies) == 3
+    m1 = WlanFrameParser.parse_80211_frame(replies[2], rssi=-40)
     assert m1 is not None and m1.type == "eapol"
     assert m1.msg_num == 1
     assert m1.pmkid == ap.pmkid_for(client)
@@ -73,14 +78,42 @@ def test_sae_ap_associates_but_sends_no_m1():
     ap = VirtualAccessPoint(ssid="sae", bssid="02:00:5e:1a:00:0b", channel=11, akm=0x08)
     replies = VirtualRadio(aps=[ap]).handle_tx(_assoc_req(ap.bssid, "02:11:22:33:44:55"),
                                                channel=11)
-    assert len(replies) == 1
+    assert len(replies) == 2            # link ACK + assoc resp, no M1 on an SAE AKM
 
 
 def test_open_ap_sends_no_m1():
     ap = VirtualAccessPoint(ssid="open", bssid="02:00:5e:1a:00:0c", channel=1, akm=None)
     replies = VirtualRadio(aps=[ap]).handle_tx(_assoc_req(ap.bssid, "02:11:22:33:44:55"),
                                                channel=1)
-    assert len(replies) == 1
+    assert len(replies) == 2            # link ACK + assoc resp
+
+
+def test_reassoc_request_gets_a_reassoc_response():
+    ap = VirtualAccessPoint(ssid="re", bssid="02:00:5e:1a:00:0e", channel=6)
+    client = "02:11:22:33:44:55"
+    reassoc = mac_header(b"\x20\x00", ap.bssid_bytes, str_to_mac(client),
+                         ap.bssid_bytes) + b"\x21\x04\x00\x00" + ssid_ie("sim-lab-2g")
+    replies = VirtualRadio(aps=[ap]).handle_tx(reassoc, channel=6)
+    assert [(r[0] & 0xF0) >> 4 for r in replies] == [13, 3, 0]   # ACK, Reassoc Resp, Data(M1)
+
+
+def test_probe_request_draws_a_response_from_every_ap_on_the_channel():
+    radio = default_radio()
+    probe = mac_header(b"\x40\x00", b"\xff\xff\xff\xff\xff\xff",
+                       str_to_mac("02:11:22:33:44:55"), b"\xff\xff\xff\xff\xff\xff") + ssid_ie("")
+    replies = radio.handle_tx(probe, channel=6)
+    assert len(replies) == 1            # only sim-lab-2g lives on channel 6
+    pkt = WlanFrameParser.parse_80211_frame(replies[0], rssi=-40)
+    assert pkt is not None and pkt.type == "probe_resp"
+    assert pkt.ssid == "sim-lab-2g"
+    assert replies[0][0] == 0x50        # Probe Response, not the beacon's 0x80
+
+
+def test_a_broadcast_frame_is_never_acked():
+    radio = default_radio()
+    broadcast_deauth = mac_header(b"\xc0\x00", b"\xff\xff\xff\xff\xff\xff",
+                                 str_to_mac(PSK_AP), str_to_mac(PSK_AP)) + b"\x07\x00"
+    assert radio.handle_tx(broadcast_deauth, channel=6) == []
 
 
 def test_the_air_ignores_a_frame_for_another_channel():
@@ -125,6 +158,27 @@ async def test_active_monitor_adopts_the_requested_mac():
     driver = SimulatedDriver()
     mac = str_to_mac("02:aa:bb:cc:dd:ee")
     assert await driver.enter_active_monitor(mac) == mac
+
+
+async def test_exit_active_monitor_clears_the_adopted_mac():
+    """A leaked monitor MAC makes every later injection carry the wrong source address."""
+    driver = SimulatedDriver()
+    await driver.enter_active_monitor(str_to_mac("02:aa:bb:cc:dd:ee"))
+    await driver.exit_active_monitor()
+    assert driver.monitor_mac is None
+
+
+async def test_close_stops_delivering_frames_that_were_already_queued():
+    driver = SimulatedDriver()
+    seen: list = []
+    driver.register_rx_callback(seen.append)
+    assert await driver.connect() is True
+    await driver.set_channel(6)
+    await asyncio.sleep(0.15)
+    await driver.close()
+    settled = len(seen)
+    await asyncio.sleep(0.3)           # longer than BEACON_PERIOD
+    assert len(seen) == settled
 
 
 # ---- discovery ------------------------------------------------------------
@@ -191,6 +245,37 @@ async def test_pmkid_harvest_produces_a_crackable_hashline():
         psk = next(a.psk for a in driver.radio.aps if a.bssid.lower() == PSK_AP)
         assert psk_matches(psk, line) is True
         assert psk_matches("definitely-not-the-passphrase", line) is False
+    finally:
+        await iface.close()
+
+
+async def test_deauth_draws_link_acks_so_the_campaign_measure_landing():
+    """The regression guard for the false negative this air used to have.
+
+    ``deauth_client`` counts the ACKs each endpoint sends back. An air that answers only
+    auth/assoc leaves that tally at zero, and the UI then prints "0/N de-auths ACK'd
+    (silent AP & client)" against a radio that in fact answers every unicast frame.
+    """
+    array, iface, driver = await _array_with_sim()
+    client = "02:11:22:33:44:66"
+    driver.radio.add_station(client)          # the client is in range and hears us
+    try:
+        res = await iface.deauth_client(PSK_AP, client, rounds=2)
+        assert res.measured is True
+        assert res.client_acks == res.client_sent == 2
+        assert res.ap_acks == res.ap_sent == 2
+    finally:
+        await iface.close()
+
+
+async def test_deauth_of_an_absent_client_is_correctly_silent():
+    """The other half of the contract: nobody is there, so nobody ACKs."""
+    array, iface, _driver = await _array_with_sim()
+    try:
+        res = await iface.deauth_client(PSK_AP, "02:11:22:33:44:77", rounds=1)
+        assert res.measured is True
+        assert res.client_acks == 0
+        assert res.ap_acks == 1               # the AP itself is present and does ACK
     finally:
         await iface.close()
 
