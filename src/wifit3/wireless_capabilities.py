@@ -573,9 +573,28 @@ def render(report: ProbeReport) -> str:
     return "\n".join(lines)
 
 
+def as_dict(adapter: AdapterReport) -> Dict[str, object]:
+    """One adapter, JSON-safe.
+
+    ``main`` and ``host_profile`` both emit this, from here, so the CLI's two entry points
+    cannot describe the same adapter with different fields.
+    """
+    return {
+        "name": adapter.name, "description": adapter.description, "driver": adapter.driver,
+        "driver_vendor": adapter.driver_vendor, "driver_provider": adapter.driver_provider,
+        "driver_version": adapter.driver_version, "driver_inf": adapter.driver_inf,
+        "radio_type": adapter.radio_type, "channel": adapter.channel, "state": adapter.state,
+        "ssid": adapter.ssid, "bssid": adapter.bssid, "mac": adapter.mac,
+        "verdict": adapter.verdict.value, "verdict_detail": adapter.verdict_detail,
+        "monitor": adapter.monitor, "injection": adapter.injection,
+        "capabilities": {k: c.value for k, c in adapter.capabilities.items()},
+        "evidence": [_squeeze(item) for item in adapter.evidence],
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="wifit3-capabilities",
+        prog="wifit3.wireless_capabilities",
         description="Report each wireless adapter's monitor-mode and injection capability.")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = parser.parse_args(argv)
@@ -587,20 +606,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "platform": report.platform,
             "error": report.error,
             "notes": report.notes,
-            "adapters": [
-                {
-                    "name": a.name, "description": a.description, "driver": a.driver,
-                    "driver_vendor": a.driver_vendor, "driver_provider": a.driver_provider,
-                    "driver_version": a.driver_version, "driver_inf": a.driver_inf,
-                    "radio_type": a.radio_type, "channel": a.channel, "state": a.state,
-                    "ssid": a.ssid, "bssid": a.bssid, "mac": a.mac,
-                    "verdict": a.verdict.value, "verdict_detail": a.verdict_detail,
-                    "monitor": a.monitor, "injection": a.injection,
-                    "capabilities": {k: c.value for k, c in a.capabilities.items()},
-                    "evidence": [_squeeze(item) for item in a.evidence],
-                }
-                for a in report.adapters
-            ],
+            "adapters": [as_dict(a) for a in report.adapters],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:

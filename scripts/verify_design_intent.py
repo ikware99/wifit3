@@ -49,7 +49,11 @@ from wifit3.chips.sim.driver import SimulatedDriver                      # noqa:
 from wifit3.chips.sim.radio import VirtualAccessPoint, VirtualRadio       # noqa: E402
 from wifit3.crack.hc22000_format import parse_hc22000                    # noqa: E402
 from wifit3.crack.wpa_psk import derive_pmk, pmkid as pmkid_of, psk_matches             # noqa: E402
+from wifit3.device import host_radios as host_radios_mod                 # noqa: E402
 from wifit3.device import manager                                        # noqa: E402
+from wifit3.host_profile import build as build_host_profile             # noqa: E402
+from wifit3.host_profile import render_text as render_host_profile      # noqa: E402
+from wifit3.host_profile import to_dict as host_profile_dict            # noqa: E402
 from wifit3.persist.save import save_pmkid                               # noqa: E402
 from wifit3.wlan.array import WlanArray                                  # noqa: E402
 
@@ -511,10 +515,10 @@ async def main(argv: list[str] | None = None) -> int:
     # one is a ready-made offline-crackable target. They are collected here only so the closing
     # leak scan can assert that none of them reached the disk.
     derived_pmkids: list[str] = []
-    # Eleven fixed steps, one reconciliation per device, one cross-check against the host's own
-    # association, one leak scan. The summary re-checks this number against what was emitted,
-    # so a step added without updating it turns the run red rather than lying in the bar.
-    planned = 11 + len(per_target) + (1 if per_target else 0) + 1
+    # 十一个固定步骤，每台设备一步对账，一次与主机实时状态交叉核对，一次主机画像同源核对，
+    # 一次泄漏扫描。汇总时会把这个数字与实际写出的行数再比一遍，所以漏改这里会让整轮变红，
+    # 而不是让进度条说假话。
+    planned = 12 + len(per_target) + (1 if per_target else 0) + 1
     rec = Recorder(ROOT / "logs", Redactor(secrets), total=planned, progress=args.progress)
     rec.head("wifit3 设计意图端到端验证",
              "无 USB Wi-Fi 卡前提下，靠虚拟通道把产品链路跑到可破解的 hash 行")
@@ -790,6 +794,35 @@ async def main(argv: list[str] | None = None) -> int:
         if iface is not None:
             await iface.close()
         reset_usb_backend()
+
+    rec.mark()
+    profile = build_host_profile()
+    payload = host_profile_dict(profile)
+    profile_text = render_host_profile(profile)
+    # 同源判据：面板与 CLI 不是两套渲染，而是同一份 payload 的两种呈现。
+    # 若哪天有人为了面板好看另写一份数据拼装，第一条断言就会红。
+    verdicts_visible = all(a.verdict.value in profile_text for a in profile.adapters)
+    round_trip_ok = (json.loads(json.dumps(payload, ensure_ascii=False))["best"]
+                     == payload["best"] == profile.best.value)
+    # 诚实性判据：报出 CNVi（不可驱动）的主机，不得同时被判为可注入。
+    cnvi_claimed_injectable = profile.can_inject and any(
+        r.architecture is host_radios_mod.Architecture.CNVI for r in profile.radios)
+    adapter_names = ", ".join(f"{a.name}({a.verdict.value})" for a in profile.adapters) or "无"
+    radio_names = ", ".join(f"{r.pci_id}/{r.architecture.value}/reach={r.reach.value}"
+                            for r in profile.radios) or "无"
+    rec.step(
+        "主机画像：CLI 与界面面板是否同源",
+        "同一条结论要能同时出现在日志里和界面上。两处各写一套，迟早给出两个答案；"
+        "本步断言两者读的是同一份 payload，并由同一份数据推出同一个结论。",
+        "host_profile.build() 采一次；校验 render_text 含每个适配器的判定、JSON 往返后 "
+        "best 不变、以及 CNVi 主机不被判为可注入",
+        "三条同时成立：判定可在文本里找到、往返后结论不变、不可驱动机型不宣称可注入",
+        f"平台 {profile.platform}；最优能力 {profile.best.value}；适配器 {adapter_names}；"
+        f"不可驱动 {radio_names}",
+        verdicts_visible and round_trip_ok and not cnvi_claimed_injectable,
+        f"文本判定可见={verdicts_visible} JSON 往返一致={round_trip_ok} "
+        f"CNVi 谎称可注入={cnvi_claimed_injectable}",
+    )
 
     rec.mark()
     ok_scan, scan_detail = scan_for_plaintext([rec.jsonl, rec.text], secrets, derived_pmkids)

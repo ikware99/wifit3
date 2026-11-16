@@ -50,11 +50,22 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog="wifit3", description="USB Wireless Auditor")
     parser.add_argument("--version", action="version", version=f"wifit3 {__version__}")
+    parser.add_argument("--capabilities", nargs="?", const="text", choices=("text", "json"),
+                        metavar="FORMAT",
+                        help="report this host's radios and wireless capabilities, then exit "
+                             "(FORMAT: text | json, default text)")
     parser.add_argument("--smoke", action="store_true", help="TEST ONLY: Run headless, render, exit 0")
     parser.add_argument("--quiet", action="store_true", help="Do not emit any logs")
     parser.add_argument("--debug", action="store_true", help="Emit verbose debug logs")
     parser.add_argument("--trace", action="store_true", help="Emit very verbose trace logs")
     args = parser.parse_args()
+
+    # Diagnostic path: same payload the TUI panel draws, so a captured log and a screenshot of
+    # the panel can never disagree. Exits without starting the app.
+    if args.capabilities:
+        from wifit3.host_profile import main as capabilities_main
+
+        raise SystemExit(capabilities_main(["--json"] if args.capabilities == "json" else []))
 
     if args.smoke:
         import asyncio

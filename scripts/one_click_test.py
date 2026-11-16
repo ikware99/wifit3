@@ -41,6 +41,7 @@ BAR_EMPTY = "░"
 # run and the summary says so out loud.
 FAST_PATHS = [
     "tests/test_style.py",
+    "tests/test_host_profile.py",
     "tests/test_wireless_capabilities.py",
     "tests/chips/sim",
     "tests/wlan",

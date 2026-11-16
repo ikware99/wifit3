@@ -231,6 +231,20 @@ def host_radios() -> List[HostRadio]:
 
 # ---- rendering ------------------------------------------------------------
 
+def as_dict(radio: HostRadio) -> Dict[str, object]:
+    """JSON-safe view of one radio, shared by ``host_profile`` and any future reporter."""
+    return {
+        "model": radio.describe(),
+        "pci_id": radio.pci_id,
+        "subsystem_id": radio.subsystem_id,
+        "location": radio.location,
+        "driver": radio.driver,
+        "architecture": radio.architecture.value,
+        "reach": radio.reach.value,
+        "notes": list(radio.notes),
+    }
+
+
 def render(radios: List[HostRadio]) -> str:
     if not radios:
         return "Host radios: none reported (no non-USB wireless controller found)."

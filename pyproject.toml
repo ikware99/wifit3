@@ -16,6 +16,9 @@ dependencies = [
 
 [project.scripts]
 wifit3 = "wifit3.__main__:main"
+# Diagnostic entry point without the TUI: usable from a script or a crash report. Same payload
+# as `wifit3 --capabilities` and the in-app panel, which all funnel through wifit3.host_profile.
+wifit3-capabilities = "wifit3.host_profile:main"
 
 [build-system]
 requires = ["hatchling"]

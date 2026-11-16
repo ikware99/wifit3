@@ -36,6 +36,7 @@ from .screens.scanner import ScannerView
 from .screens.focus_v2 import FocusViewV2
 from .screens.error_modals import FatalErrorModal, RecoverableErrorModal
 from .screens.new_device import NewDeviceDialog
+from .screens.capabilities import CapabilitiesPanel
 from .screens.vault_drawer import VaultDrawer
 from .clipboard import copy_copyq_text, copy_macos_text, copy_windows_text
 from .pref import PreferencesModal
@@ -58,7 +59,8 @@ class WifiteApp(App):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
         Binding("ctrl+p", "preferences", "Prefs"),
-        Binding("v", "toggle_vault", "Vault")
+        Binding("v", "toggle_vault", "Vault"),
+        Binding("ctrl+r", "show_capabilities", "Radios"),
     ]
 
     CSS = """
@@ -494,6 +496,16 @@ class WifiteApp(App):
 
     def action_preferences(self) -> None:
         self.push_screen(PreferencesModal())
+
+    def action_show_capabilities(self) -> None:
+        """Report what this host's radios can do, and what wifit3 can never drive.
+
+        Same payload as ``wifit3 --capabilities``: the panel is the readable half of a diagnostic
+        that a script can also capture.
+        """
+        if isinstance(self.screen, CapabilitiesPanel):
+            return
+        self.push_screen(CapabilitiesPanel())
 
     async def action_quit(self):
         self.persist_config()
