@@ -13,6 +13,7 @@
 |---|---|
 | **完整任务上下文移交文档** | [`docs/planning/INTEL-9462-HANDOFF.md`](docs/planning/INTEL-9462-HANDOFF.md) |
 | **本轮实施进度（2026-11-16）** | [`docs/planning/2026-11-16-PROGRESS.md`](docs/planning/2026-11-16-PROGRESS.md) |
+| **参考项目清单（2026-11-16）** | [`docs/planning/2026-11-16-REFERENCE-PROJECTS.md`](docs/planning/2026-11-16-REFERENCE-PROJECTS.md) |
 | 任务 A：虚拟 WiFi 适配器 | [issue #1](https://github.com/ikware99/wifit3/issues/1) |
 | 任务 B：9462 独立探测通路 | [issue #2](https://github.com/ikware99/wifit3/issues/2) |
 | 任务 C：无线能力体检工具 | [issue #3](https://github.com/ikware99/wifit3/issues/3) |
