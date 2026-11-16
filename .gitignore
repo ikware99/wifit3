@@ -53,3 +53,7 @@ scripts/wps/lab_results.jsonl
 
 # Verification run logs (never committed: may name a live network)
 logs/
+# --debug-plaintext dump: passphrases and ready-to-crack PMKIDs in the clear. Ignored by
+# default so that asking for the debug switch cannot accidentally publish a network's key.
+/logout.txt
+/logout*.txt

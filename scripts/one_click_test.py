@@ -7,13 +7,18 @@ exactly like a phase that passed. This script runs them in order, prints which o
 with a running percentage, and ends with one verdict plus a single log file worth handing over.
 
 Per-device credentials are read from ``.secrets/targets.txt`` (one ``SSID:BSSID:PSKFILE`` per
-line). Only file paths ever reach a command line, and the path itself is masked in the printed
-command, so a passphrase cannot end up in the log or the shell history.
+line), or typed at a prompt with ``--ask-targets``. Only file paths ever reach a command line,
+and the path itself is masked in the printed command, so a passphrase cannot end up in the log
+or the shell history.
+
+Exit codes follow ``verify_design_intent.py``: ``0`` every phase passed, ``3`` nothing failed
+but at least one check was suspended (see ``--debug-plaintext``), ``1`` something failed.
 
 Usage:
     .venv/Scripts/python.exe scripts/one_click_test.py
     .venv/Scripts/python.exe scripts/one_click_test.py --fast
     .venv/Scripts/python.exe scripts/one_click_test.py --include-slow --no-verify
+    .venv/Scripts/python.exe scripts/one_click_test.py --ask-targets
 """
 from __future__ import annotations
 
@@ -52,12 +57,18 @@ def _encodable(text: str) -> bool:
 
 BAR_FULL, BAR_EMPTY = ("█", "░") if _encodable("█") and _encodable("░") else ("#", "-")
 
+# Mirrors verify_design_intent.py: a phase can pass while containing a suspended check, and a
+# wrapper that reported that as a plain pass would be repeating a claim nobody verified.
+EXIT_SUSPENDED = 3
+DEFAULT_DEBUG_PLAINTEXT = "logout.txt"
+
 # The subset that covers everything this branch touched, for a check that finishes while you
 # wait. It is a convenience, never the release gate: a green --fast run proves less than a full
 # run and the summary says so out loud.
 FAST_PATHS = [
     "tests/test_style.py",
     "tests/test_host_profile.py",
+    "tests/test_verify_design_intent.py",
     "tests/test_wireless_capabilities.py",
     "tests/chips/sim",
     "tests/wlan",
@@ -142,6 +153,9 @@ class Run:
         log_path.write_text("", encoding="utf-8", newline="\n")
         self.total = total
         self.rows: list[dict] = []
+        # Phases that passed but contain a check nobody executed. Kept separate from rows so the
+        # summary can say so out loud instead of letting a PASS cell carry the whole story.
+        self.paused: list[str] = []
         self._t0 = time.perf_counter()
 
     def emit(self, line: str = "") -> None:
@@ -160,15 +174,20 @@ class Run:
         self.emit(f"--- {name} " + "-" * max(0, 60 - len(name)))
         return time.perf_counter()
 
-    def end(self, idx: int, name: str, started: float, ok: bool, note: str = "") -> bool:
+    def end(self, idx: int, name: str, started: float, ok: bool, note: str = "",
+            suspended: bool = False) -> bool:
         took = time.perf_counter() - started
         pct = idx / max(self.total, 1) * 100
         mark = "PASS" if ok else "FAIL"
+        if ok and suspended:
+            mark = "PASS*"
+            self.paused.append(name)
         self.emit("")
         self.emit(f"[{idx}/{self.total}] {bar(idx, self.total)} {pct:3.0f}%  "
                   f"{name}  {mark}  {took:.1f}s"
                   + (f"  {note}" if note else ""))
-        self.rows.append(dict(phase=name, ok=ok, seconds=round(took, 1), note=note))
+        self.rows.append(dict(phase=name, ok=ok, seconds=round(took, 1), note=note,
+                              suspended=suspended))
         return ok
 
     def run_stream(self, cmd: list[str], env: dict[str, str]) -> tuple[int, str]:
@@ -195,7 +214,8 @@ class Run:
         self.emit(f"  {_pad('#', 4)}{_pad('阶段', 26)}{_pad('结果', 6)}"
                   f"{_pad('耗时', 9, right=True)}   说明")
         for i, row in enumerate(self.rows, 1):
-            mark = "PASS" if row["ok"] else "FAIL"
+            mark = "PASS*" if (row["ok"] and row.get("suspended")) else (
+                "PASS" if row["ok"] else "FAIL")
             cost = f"{row['seconds']:.1f}s"
             self.emit(f"  {_pad(str(i), 4)}{_pad(row['phase'], 26)}{_pad(mark, 6)}"
                       f"{_pad(cost, 9, right=True)}   {row['note']}")
@@ -203,6 +223,11 @@ class Run:
         ok = all(row["ok"] for row in self.rows)
         self.emit(f"  {_pad('', 4)}{_pad('总计', 26)}{_pad('PASS' if ok else 'FAIL', 6)}"
                   f"{_pad(f'{wall_s:.1f}s', 9, right=True)}")
+        if self.paused:
+            self.emit("")
+            self.emit(f"  * 暂停：{'、'.join(self.paused)} 里有断言按当前开关没有执行，"
+                      f"既不算通过也不算失败。")
+            self.emit("    本轮结论不是「干净通过」，退出码 3。关闭调试开关后才是完整门禁。")
         if fast:
             self.emit("")
             self.emit("  注意：本次为 --fast 子集，不能作为发布门禁结论；"
@@ -245,12 +270,17 @@ def git_snapshot(py: Path) -> str:
     return f"{branch or '?'} @ {head or '?'}（{dirty_note}）"
 
 
-def read_verify_counts(stamp: str) -> tuple[int, int]:
-    """Count the verification steps that passed, straight from its JSONL."""
+def read_verify_counts(stamp: str) -> tuple[int, int, int]:
+    """Count the verification steps that passed, the total, and how many were suspended.
+
+    Read from the JSONL rather than the exit code so the note can carry numbers: "14/15 通过，
+    1 暂停" says more than "rc=3", and a reader who only skims the summary still learns that
+    something was switched off.
+    """
     path = ROOT / "logs" / f"{stamp}-设计意图验证.jsonl"
     if not path.exists():
-        return 0, 0
-    ok = total = 0
+        return 0, 0, 0
+    ok = total = suspended = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -259,9 +289,14 @@ def read_verify_counts(stamp: str) -> tuple[int, int]:
         except json.JSONDecodeError:
             continue
         total += 1
-        if row.get("ok"):
+        # A missing key counts as not-passed; only an explicit null means "suspended", which is
+        # what verify_design_intent.py writes for a check the run itself switched off.
+        outcome = row.get("ok", False)
+        if outcome is True:
             ok += 1
-    return ok, total
+        elif outcome is None:
+            suspended += 1
+    return ok, total, suspended
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -279,6 +314,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="跳过打包产物自检（默认在 dist/ 存在产物时自动执行）")
     ap.add_argument("--progress", choices=("plain", "bar", "none"), default="plain",
                     help="设计意图验证阶段的进度显示方式（默认 plain，适合被本脚本接管输出）")
+    ap.add_argument("--ask-targets", action="store_true",
+                    help="在验证阶段交互式输入 SSID/BSSID（口令仍只从文件路径取），"
+                         "不必维护 .secrets/targets.txt")
+    ap.add_argument("--debug-plaintext", nargs="?", const=DEFAULT_DEBUG_PLAINTEXT,
+                    metavar="PATH",
+                    help="调试开关，透传给验证阶段：把口令明文与 PMKID 写到 PATH"
+                         f"（默认 ./{DEFAULT_DEBUG_PLAINTEXT}）。打开后本轮不再是干净通过")
     return ap.parse_args(argv)
 
 
@@ -367,18 +409,32 @@ def main(argv: list[str] | None = None) -> int:
         idx += 1
         t = run.start(idx, "设计意图验证")
         targets = load_targets()
-        if not targets:
+        if not targets and not args.ask_targets:
             run.emit(f"  未发现 {TARGETS_FILE.relative_to(ROOT)}，跳过设备对账阶段。")
             run.emit("  建立该文件即可启用：每行写 SSID:BSSID:口令文件路径")
+            run.emit("  或者加 --ask-targets，直接在这里输入 SSID/BSSID。")
             run.end(idx, "设计意图验证", t, True, "无设备配置，仅未执行")
         else:
-            run.emit(f"  设备 {len(targets)} 台（口令文件路径在输出中已隐藏）")
+            if targets:
+                run.emit(f"  设备 {len(targets)} 台（口令文件路径在输出中已隐藏）")
+            else:
+                run.emit("  未配置目标文件，改为交互输入 SSID/BSSID。")
             cmd = [str(py), str(VERIFY), "--progress", args.progress]
             for target in targets:
                 cmd += ["--target", target]
+            if args.ask_targets:
+                cmd += ["--ask-targets"]
+            if args.debug_plaintext:
+                cmd += ["--debug-plaintext", args.debug_plaintext]
+                run.emit(f"  调试开关已打开：明文写入 {args.debug_plaintext}，"
+                         f"本轮不会判定为干净通过。")
             rc, _ = run.run_stream(cmd, child_env)
-            ok2, total2 = read_verify_counts(stamp)
-            run.end(idx, "设计意图验证", t, rc == 0, f"{ok2}/{total2} 步通过")
+            ok2, total2, susp2 = read_verify_counts(stamp)
+            note = f"{ok2}/{total2} 步通过" + (f"，{susp2} 步暂停" if susp2 else "")
+            # 3 is "nothing failed, one check switched off" rather than "something broke", so it
+            # keeps the phase green while still reaching the final exit code.
+            run.end(idx, "设计意图验证", t, rc in (0, EXIT_SUSPENDED), note,
+                    suspended=rc == EXIT_SUSPENDED or susp2 > 0)
 
     if artifact is not None:
         idx += 1
@@ -399,7 +455,10 @@ def main(argv: list[str] | None = None) -> int:
         run.end(idx, "打包产物自检", t, rc == 0,
                 f"{artifact.name} --smoke 退出码 {rc}")
 
-    return 0 if run.summary(time.perf_counter() - wall, args.fast) else 1
+    clean = run.summary(time.perf_counter() - wall, args.fast)
+    if not clean:
+        return 1
+    return EXIT_SUSPENDED if run.paused else 0
 
 
 if __name__ == "__main__":

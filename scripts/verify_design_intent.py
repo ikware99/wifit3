@@ -15,10 +15,27 @@ Usage:
     .venv/Scripts/python.exe scripts/verify_design_intent.py \\
         --target "enhua:24:f6:03:27:76:cc:.secrets/enhua.psk" \\
         --target "Enhua_a:90:76:9f:ae:8d:e8:.secrets/enhua_a.psk"
+    .venv/Scripts/python.exe scripts/verify_design_intent.py --ask-targets
+    .venv/Scripts/python.exe scripts/verify_design_intent.py --debug-plaintext
 
 The passphrase is never accepted on a command line: only a file path, stdin or a no-echo
 prompt. A single device may carry its own file in the third field of ``--target``; when that
 field is omitted the shared ``--psk-file`` value is used instead.
+
+Two switches exist for the two things a log cannot do:
+
+``--ask-targets``
+    Type SSID/BSSID at a prompt instead of maintaining ``.secrets/targets.txt``. The passphrase
+    is still only ever taken from a file path, so nothing secret reaches ``sys.argv``.
+
+``--debug-plaintext [PATH]``
+    Deliberately dumps the plaintext the log withholds (per-device passphrase, derived PMKID)
+    to ``PATH``, default ``./logout.txt``. It is a debugging aid, not a report: with the switch
+    on, the closing "keys never touch disk" check cannot be asserted, so it is emitted as
+    SUSPENDED and the run is explicitly not a clean bill.
+
+Exit codes: ``0`` every step passed, ``3`` nothing failed but at least one step was suspended,
+``1`` something failed, ``2`` the run was refused before doing any work.
 """
 from __future__ import annotations
 
@@ -63,6 +80,28 @@ HASHCAT_VECTOR = ("WPA*01*4d4fe7aac3a2cecab195321ceb99a7d0*fc690c158264*f4747f87
 
 
 REDACTED = "«已脱敏»"
+# Where --debug-plaintext dumps by default. Kept in .gitignore next to the other run outputs,
+# because a tracked plaintext file is one `git add -A` away from the wrong pair of eyes.
+DEFAULT_DEBUG_PLAINTEXT = "logout.txt"
+
+# Every step has three outcomes, not two. A check that the run itself disabled (see
+# --debug-plaintext) has neither passed nor failed, and calling it PASS would be the exact
+# false green the check exists to prevent, while calling it FAIL would abort a run that did
+# nothing wrong. SUSPENDED is the honest third answer, and it is never counted as passed.
+PASS, FAIL, SUSPENDED = True, False, None
+SUSPENDED_LABEL = "SUSPENDED（暂停：按当前开关未执行该断言，不计入通过）"
+# Distinct from 0 and 1 so a caller can tell "everything passed" from "nothing failed, but one
+# check was switched off". Both are green enough to continue; only one is a clean bill.
+EXIT_SUSPENDED = 3
+
+
+
+def verdict_of(ok: bool | None) -> str:
+    """The one place that decides how a step outcome is spelled."""
+    if ok is SUSPENDED:
+        return SUSPENDED_LABEL
+    return "PASS" if ok else "FAIL"
+
 
 
 class Redactor:
@@ -266,8 +305,16 @@ class Recorder:
         self._emit(f"{subtitle}")
         self._emit(bar)
 
+    def note(self, text: str = "") -> None:
+        """Emit a line that belongs in the log but is not a step: a banner, a caveat, a choice.
+
+        Goes through the redactor and the tee like everything else, so a warning about the run
+        is still findable in the artifact the run hands over.
+        """
+        self._emit(text)
+
     def step(self, title: str, intent: str, action: str, expected: str,
-             actual: str, ok: bool, detail: str = "") -> bool:
+             actual: str, ok: bool | None, detail: str = "") -> bool | None:
         self.n += 1
         sid = f"S{self.n:02d}"
         elapsed_ms = (time.perf_counter() - self._mark) * 1000
@@ -279,10 +326,12 @@ class Recorder:
         self._emit(f"     实测  {actual}")
         if detail:
             self._emit(f"     备注  {detail}")
-        self._emit(f"     结论  {'PASS' if ok else 'FAIL'}")
+        self._emit(f"     结论  {verdict_of(ok)}")
         row = dict(ts=datetime.datetime.now().isoformat(timespec="seconds"), step=sid,
                    title=title, intent=intent, action=action, expected=expected,
-                   actual=actual, ok=ok, detail=detail, elapsed_ms=round(elapsed_ms, 1),
+                   actual=actual, ok=ok, verdict=("suspended" if ok is SUSPENDED
+                                                  else "pass" if ok else "fail"),
+                   detail=detail, elapsed_ms=round(elapsed_ms, 1),
                    progress=f"{self.n}/{self._planned or '?'}")
         row = {k: self._redact(v) if isinstance(v, str) else v for k, v in row.items()}
         self.rows.append(row)
@@ -292,9 +341,16 @@ class Recorder:
         self._mark = time.perf_counter()
         return ok
 
+    def counts(self) -> tuple[int, int, int]:
+        """How many steps passed, failed and were suspended. One definition, used twice."""
+        passed = sum(1 for r in self.rows if r["ok"] is PASS)
+        failed = sum(1 for r in self.rows if r["ok"] is FAIL)
+        suspended = sum(1 for r in self.rows if r["ok"] is SUSPENDED)
+        return passed, failed, suspended
+
     def summary(self, wall_s: float) -> bool:
         self._bar.close()
-        passed = sum(1 for r in self.rows if r["ok"])
+        passed, failed, suspended = self.counts()
         consistent = not self._planned or self._planned == len(self.rows)
         bar = "=" * 78
         self._emit("")
@@ -310,15 +366,27 @@ class Recorder:
         self._emit(f"  步骤累计      {step_s:>8.2f} s")
         self._emit(f"  端到端墙钟    {wall_s:>8.2f} s")
         self._emit(f"  平均每步      {step_s / max(len(self.rows), 1) * 1000:>8.0f} ms")
-        self._emit(f"  步骤数        {len(self.rows):>8d}  （PASS {passed} / FAIL {len(self.rows) - passed}）")
+        self._emit(f"  步骤数        {len(self.rows):>8d}  "
+                   f"（PASS {passed} / FAIL {failed} / 暂停 {suspended}）")
         if self._planned:
             verdict = "一致" if consistent else "不一致（进度条总数与实际步数不符）"
             self._emit(f"  进度计划      {len(self.rows)}/{self._planned}  {verdict}")
+        if suspended:
+            self._emit("")
+            self._emit(f"  注意  本轮 {suspended} 项暂停，既不算通过也不算失败。")
+            self._emit("        这些断言按当前开关没有执行，所以整体结论不是「干净通过」。")
+            for r in self.rows:
+                if r["ok"] is SUSPENDED:
+                    self._emit(f"        {r['step']}  {r['title']}")
+        self._emit("")
+        overall = "FAIL" if (failed or not consistent) else (
+            f"PASS（含 {suspended} 项暂停，非干净通过）" if suspended else "PASS")
+        self._emit(f"  本轮结论      {overall}")
         self._emit("")
         self._emit(f"日志  {self.jsonl}")
         self._emit(f"      {self.text}")
         self._emit(bar)
-        return passed == len(self.rows) and consistent
+        return failed == 0 and consistent
 
 
 def ref_pmkid(psk: str, essid: bytes, aa: bytes, spa: bytes) -> str:
@@ -461,6 +529,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--target", action="append", metavar="SSID:BSSID[:PSKFILE]",
                     help="真实设备，可重复。第三段是该设备自己的口令文件路径，"
                          "省略时回退到 --psk-file 提供的口令")
+    ap.add_argument("--ask-targets", action="store_true",
+                    help="交互式输入 SSID/BSSID（口令仍只从文件路径取），"
+                         "不必维护 .secrets/targets.txt")
+    ap.add_argument("--debug-plaintext", nargs="?", const=DEFAULT_DEBUG_PLAINTEXT,
+                    metavar="PATH",
+                    help=f"调试开关：把口令明文与派生 PMKID 写入 PATH"
+                         f"（默认 ./{DEFAULT_DEBUG_PLAINTEXT}）。打开后「密钥不落地」一步转为暂停，"
+                         f"本轮不再判定为干净通过")
     ap.add_argument("--progress", choices=("auto", "bar", "plain", "none"), default="auto",
                     help="进度显示：auto 在终端画进度条、重定向时关闭（默认）；"
                          "bar 强制画条；plain 只输出百分比行；none 关闭")
@@ -471,10 +547,15 @@ _MAC_RE = r"[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}"
 _TARGET_RE = re.compile(rf"^(?P<ssid>.+?):(?P<bssid>{_MAC_RE})(?::(?P<keyfile>.+))?$")
 
 
-def parse_targets(args: argparse.Namespace) -> list[tuple[str, str, str | None]]:
-    """Split ``SSID:BSSID[:PSKFILE]`` records. Only a path travels here, never the secret."""
+def parse_targets(records: "Iterable[str] | None") -> list[tuple[str, str, str | None]]:
+    """Split ``SSID:BSSID[:PSKFILE]`` records. Only a path travels here, never the secret.
+
+    Takes raw strings rather than the parsed namespace so that a typed target and a
+    command-line target go through the exact same validator: two validators drift, and the one
+    that drifts is always the one nobody reads.
+    """
     out: list[tuple[str, str, str | None]] = []
-    for raw in (args.target or []):
+    for raw in (records or []):
         m = _TARGET_RE.match(raw.strip())
         if not m:
             raise SystemExit(
@@ -486,6 +567,160 @@ def parse_targets(args: argparse.Namespace) -> list[tuple[str, str, str | None]]
             raise SystemExit(f"--target 缺少 SSID：{raw!r}")
         out.append((ssid, bssid, m.group("keyfile") or None))
     return out
+
+
+def _ask(label: str) -> str:
+    """Print the whole prompt as its own line, then read one answer.
+
+    Deliberately not ``input(label)``: this script is normally started by
+    ``one_click_test.py``, which reads the child's stdout line by line. A prompt written
+    without a newline sits in the pipe until the next flush, so the operator would face a
+    blank screen and a cursor. A complete line arrives immediately.
+    """
+    print(label, flush=True)
+    try:
+        return input().strip()
+    except EOFError:
+        return ""
+
+
+def _ask_bssid(state: dict[str, str]) -> str:
+    """Read one BSSID, accept any spelling, and hand back the canonical colon form."""
+    live = mac_hex(state.get("bssid", ""))
+    hint = (":".join(live[i:i + 2] for i in range(0, 12, 2))) if len(live) == 12 else ""
+    label = ("BSSID（六组十六进制，回车 = 沿用系统当前关联的 " + hint + "）：" if hint
+             else "BSSID（六组十六进制，例如 24:f6:03:27:76:cc）：")
+    while True:
+        raw = _ask(label) or hint
+        digits = mac_hex(raw)
+        if len(digits) == 12:
+            return ":".join(digits[i:i + 2] for i in range(0, 12, 2))
+        print(f"  这不是六组十六进制（去掉分隔符后 {len(digits)} 位）：{raw!r}，请重输")
+
+
+def _ask_keyfile() -> str | None:
+    """Read a path, never the secret. A path is safe to type into a terminal."""
+    while True:
+        raw = _ask("口令文件路径（只输路径，不要在提示里直接打口令；回车 = 沿用共用口令）：")
+        if not raw:
+            return None
+        if Path(raw).is_file():
+            return raw
+        print(f"  找不到这个文件：{raw}，请重输（或回车沿用共用口令）")
+
+
+def ask_targets(state: dict[str, str] | None = None) -> list[str]:
+    """Collect ``SSID:BSSID[:PSKFILE]`` records from the operator, one network at a time.
+
+    Refuses without a terminal instead of reading EOF: a pipe would end the loop immediately
+    and produce a run with zero targets, which looks exactly like a run that checked nothing
+    because there was nothing to check.
+    """
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "拒绝执行：--ask-targets 需要交互式终端，而标准输入不是终端。\n"
+            "  无人值守场景请改用 --target SSID:BSSID[:口令文件路径]，可重复给出。")
+    state = system_wifi_state() if state is None else state
+    live_bssid = mac_hex(state.get("bssid", ""))
+    live_ssid = state.get("ssid", "")
+
+    print()
+    print("输入要实测的网络。SSID 直接回车表示结束；口令只输文件路径。")
+    records: list[str] = []
+    while True:
+        index = len(records) + 1
+        print()
+        print(f"── 第 {index} 个网络 " + "─" * 40)
+        ssid = _ask(f"SSID（直接回车结束输入，已录入 {len(records)} 个）：")
+        if not ssid:
+            break
+        bssid = _ask_bssid(state)
+        if live_bssid and mac_hex(bssid) == live_bssid and ssid != live_ssid:
+            print(f"  提醒：这个 BSSID 正是系统当前关联的 {live_ssid!r}，"
+                  f"但 SSID 填的是 {ssid!r}。两者必须一致，否则对账的是一个不存在的网络。")
+        keyfile = _ask_keyfile()
+        records.append(f"{ssid}:{bssid}" + (f":{keyfile}" if keyfile else ""))
+
+    if not records:
+        print("  没有输入任何网络，设备对账阶段将不执行。")
+        return []
+    print()
+    print(f"已录入 {len(records)} 个目标（口令文件只显示路径）：")
+    for i, record in enumerate(records, 1):
+        print(f"  {i}. {record}")
+    if live_bssid:
+        print(f"  系统当前关联 {live_ssid} @ {state.get('bssid')}，仅作对照，不参与判定。")
+    return records
+
+
+def git_ignore_note(path: Path) -> str:
+    """One warning line if this path could end up in a commit, empty when there is nothing to say.
+
+    A plaintext dump inside a tracked path is one ``git add -A`` away from being published, so
+    the answer is worth printing rather than assuming the operator thought about it. A path
+    outside the repository cannot be committed at all, which is why it earns no line.
+    """
+    try:
+        path.relative_to(ROOT)
+    except ValueError:
+        return ""
+    try:
+        proc = subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=str(ROOT),
+                              capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "git 不可用，无法确认该路径是否被忽略，提交前请自行确认"
+    if proc.returncode == 0:
+        return ""
+    if proc.returncode == 1:
+        return "该明文文件不在 .gitignore 内，一次 git add -A 就会把它带进仓库"
+    return "git 无法确认该路径是否被忽略，提交前请自行确认"
+
+
+def write_debug_plaintext(path: Path, entries: list[dict], shared: str | None) -> int:
+    """Write the plaintext the normal log withholds. Returns how many secrets were dumped.
+
+    This exists because a fingerprint proves *which* passphrase was used only to someone who
+    already has the passphrase. Debugging needs the value itself, so the switch writes it to a
+    file the operator names, and the run says out loud that the no-disk guarantee is off.
+
+    Deliberately bypasses ``Recorder``: every string that goes through it is redacted and
+    teed into the shareable log, which is the one thing this file must not do.
+    """
+    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    lines = [
+        "# wifit3 调试导出：口令与 PMKID 明文",
+        f"# 生成时间  {stamp}",
+        "# 为什么会有这个文件：PMKID 与该网络的 SSID/BSSID 一起就是一份可直接离线爆破的",
+        "#   hash，所以正常日志只留 sha256 指纹。本文件是 --debug-plaintext 打开的调试产物，",
+        "#   用途是事后核对某一轮用的到底是哪份口令。",
+        "# 处置：核对完立即删除。含明文口令，不要放进共享盘、网盘或任何会同步的目录。",
+        "",
+    ]
+    if entries:
+        lines.append("# 口令：指纹 -> 明文")
+        for e in entries:
+            lines.append(f"sha256[:12]={e['fp']}  ssid={e['ssid']}  bssid={e['bssid']}  "
+                         f"psk={e['psk']}")
+        lines.append("")
+    hashed = [e for e in entries if e.get("pmkid")]
+    if hashed:
+        lines.append("# 派生 PMKID：可直接喂 hashcat -m 22000")
+        for e in hashed:
+            lines.append(f"ssid={e['ssid']}  bssid={e['bssid']}  sta={e['sta']}  "
+                         f"pmkid={e['pmkid']}")
+        lines.append("")
+    if shared and shared not in {e["psk"] for e in entries}:
+        # Only worth a line when it is a passphrase no target above actually used: repeating a
+        # value already printed twice makes the file noisier without making it more useful.
+        lines.append("# 共用口令（--psk-file 提供，本轮未被任何一台设备采用）")
+        lines.append(f"psk={shared}")
+        lines.append("")
+    rows = "\n".join(lines) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(rows, encoding="utf-8", newline="\n")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    return len(entries)
 
 
 def harden_stdout() -> None:
@@ -507,13 +742,34 @@ async def main(argv: list[str] | None = None) -> int:
     harden_stdout()
     args = parse_args(argv)
     shared = read_secret(args)
-    targets = parse_targets(args)
+    # Typed targets and --target records share one validator, so a value that would be rejected
+    # on the command line is rejected at the prompt too.
+    typed = ask_targets() if args.ask_targets else []
+    targets = parse_targets([*(args.target or []), *typed])
     per_target: list[tuple[str, str, str | None]] = [
         (ssid, bssid, read_target_secret(keyfile, shared)) for ssid, bssid, keyfile in targets
     ]
     secrets = [s for _, _, s in per_target if s]
     if shared and shared not in secrets:
         secrets.append(shared)
+
+    for secret in secrets:
+        if not 8 <= len(secret) <= 63:
+            # A 1-character "passphrase" makes the closing byte scan match every log line and
+            # makes the fingerprint trivially reversible. Neither is a bug in the scan, so say
+            # why the result will look strange instead of letting it look like a leak.
+            print(f"注意：有一份口令长度 {len(secret)}，不在 WPA 的 8-63 字符范围内。"
+                  f"派生对账照跑，但泄漏扫描是按子串比对的，过短的值会命中文档里的普通字符；"
+                  f"指纹也就不再不可逆。", file=sys.stderr)
+
+    # The switch only means something if there is something secret to dump. Asking for it with
+    # no passphrase at all leaves nothing to write, so the no-disk check runs as usual instead
+    # of being suspended over an empty file.
+    debug_path = Path(args.debug_plaintext).expanduser() if args.debug_plaintext else None
+    if debug_path is not None and not debug_path.is_absolute():
+        debug_path = (Path.cwd() / debug_path).resolve()
+    debug_active = debug_path is not None and bool(secrets)
+    debug_entries: list[dict] = []
 
     if args.fingerprint:
         if not secrets:
@@ -524,6 +780,12 @@ async def main(argv: list[str] | None = None) -> int:
                 print(f"{ssid} @ {bssid}  口令指纹 sha256[:12] = {fingerprint(psk)}")
         if shared and not per_target:
             print(f"共用口令  指纹 sha256[:12] = {fingerprint(shared)}")
+        if debug_active:
+            entries = [dict(ssid=ssid, bssid=bssid, psk=psk, fp=fingerprint(psk), sta="",
+                            pmkid="") for ssid, bssid, psk in per_target if psk]
+            write_debug_plaintext(debug_path, entries, shared)
+            print(f"调试明文已写入 {debug_path}（指纹到明文的对照）；"
+                  f"核对完请删除该文件。", file=sys.stderr)
         return 0
 
     wall_start = time.perf_counter()
@@ -531,13 +793,25 @@ async def main(argv: list[str] | None = None) -> int:
     # one is a ready-made offline-crackable target. They are collected here only so the closing
     # leak scan can assert that none of them reached the disk.
     derived_pmkids: list[str] = []
-    # 十一个固定步骤，每台设备一步对账，一次与主机实时状态交叉核对，一次主机画像同源核对，
-    # 一次泄漏扫描。汇总时会把这个数字与实际写出的行数再比一遍，所以漏改这里会让整轮变红，
-    # 而不是让进度条说假话。
+    # 固定 11 步 + 主机画像 1 步 = 12，每台设备一步对账，有设备时再加一次与主机实时状态
+    # 交叉核对，末尾一次泄漏扫描。汇总时会把这个数字与实际写出的行数再比一遍，所以漏改这里
+    # 会让整轮变红，而不是让进度条说假话。
     planned = 12 + len(per_target) + (1 if per_target else 0) + 1
     rec = Recorder(ROOT / "logs", Redactor(secrets), total=planned, progress=args.progress)
     rec.head("wifit3 设计意图端到端验证",
              "无 USB Wi-Fi 卡前提下，靠虚拟通道把产品链路跑到可破解的 hash 行")
+    if debug_active:
+        rec.note("")
+        rec.note("!" * 78)
+        rec.note("! 调试开关已打开：口令明文与派生 PMKID 会写入下面这个文件")
+        rec.note(f"!   {debug_path}")
+        rec.note("! 该文件等同于一份可直接离线爆破的 hash 加上它的口令，核对完请删除。")
+        rec.note("! 本轮「密钥不落地」一步转为暂停，整体结论不是干净通过。")
+        rec.note("!" * 78)
+    elif debug_path is not None:
+        rec.note("")
+        rec.note(f"调试开关已打开（{debug_path}），但本轮没有提供任何口令，"
+                 f"没有明文可写；「密钥不落地」一步照常执行。")
     rec.tick("准备开始")
 
     # -- S01 -----------------------------------------------------------------
@@ -757,6 +1031,12 @@ async def main(argv: list[str] | None = None) -> int:
             derived = pmkid_of(derive_pmk(psk, essid), aa, client_hex).hex()
             independent = ref_pmkid(psk, essid, aa, client_hex)
             derived_pmkids.append(derived)
+            if debug_active:
+                # Collected here because this is the only place the triple exists: the network's
+                # own SSID/BSSID, the passphrase behind it, and the hash derived from both.
+                debug_entries.append(dict(ssid=ssid, bssid=bssid, psk=psk,
+                                          fp=fingerprint(psk), sta=attack.client_mac,
+                                          pmkid=derived))
             if derived == independent:
                 actual = f"两侧一致（PMKID 已隐去）；口令指纹 {fingerprint(psk)}"
                 detail = ("PMKID 与该网络的 SSID/BSSID 一起就是一份可直接离线爆破的 hash，"
@@ -794,8 +1074,14 @@ async def main(argv: list[str] | None = None) -> int:
                 actual = (f"系统当前关联 {live_ssid} @ {state.get('bssid')}"
                           f"（{state.get('auth', '?')} / {state.get('cipher', '?')}，"
                           f"信道 {state.get('channel', '?')}），命中 {len(matched)} 个目标")
-                note = ("声明的 SSID 与系统一致" if not clashes
-                        else "；".join(clashes))
+                if clashes:
+                    note = "；".join(clashes)
+                elif matched:
+                    note = f"命中的 {len(matched)} 个目标，其 SSID 与系统一致"
+                else:
+                    # "一致" would be vacuously true here and would read as a check that ran.
+                    # Nothing overlapped, so the honest report is that nothing was compared.
+                    note = "系统关联的网络不在目标列表内，本步无重叠可比对"
             rec.step(
                 "目标参数自检：与操作系统实时关联状态对账",
                 "参数若填错，前面所有对账都在验证一个不存在的目标，而且照样自洽。"
@@ -842,19 +1128,56 @@ async def main(argv: list[str] | None = None) -> int:
 
     rec.mark()
     ok_scan, scan_detail = scan_for_plaintext([rec.jsonl, rec.text], secrets, derived_pmkids)
-    rec.step(
-        "密钥不落地：回读日志确认无明文",
-        "把承诺变成可执行断言。若将来有人把口令写进日志，这一步会失败而不是悄悄写盘。",
-        "以字节形式回读 JSONL 与 .log，扫描口令明文、两种十六进制形式，以及真实网络派生出的 PMKID",
-        "两处日志均不含任何一份口令，也不含真实网络的 PMKID",
-        scan_detail,
-        ok_scan,
-        "" if ok_scan else "已删除日志，避免明文继续留存",
-    )
+    if debug_active:
+        write_problem = ""
+        try:
+            dumped = write_debug_plaintext(debug_path, debug_entries, shared)
+        except OSError as exc:
+            dumped, write_problem = 0, f"{type(exc).__name__}: {exc}"
+        ignored = git_ignore_note(debug_path)
+        # The switch excuses the file we wrote on purpose. It does not excuse a leak into the
+        # log: a real leak is a FAIL whatever else is going on, because that log gets shared.
+        outcome = FAIL if (write_problem or not ok_scan) else SUSPENDED
+        rec.step(
+            "密钥不落地：回读日志确认无明文",
+            "把承诺变成可执行断言。若将来有人把口令写进日志，这一步会失败而不是悄悄写盘。",
+            "以字节形式回读 JSONL 与 .log，扫描口令明文、两种十六进制形式，以及真实网络派生出的 PMKID",
+            "两处日志均不含任何一份口令，也不含真实网络的 PMKID",
+            (f"调试开关已打开：{dumped} 份口令与 PMKID 明文写入 {debug_path}"
+             + (f"（写入失败：{write_problem}）" if write_problem else "")
+             + f"；日志本身扫描结果 -> {scan_detail}"),
+            outcome,
+            "；".join(filter(None, [
+                "本轮这条要求按调试开关暂停执行，不计入通过；关闭 --debug-plaintext 后才是硬断言",
+                ignored,
+            ])),
+        )
+    else:
+        rec.step(
+            "密钥不落地：回读日志确认无明文",
+            "把承诺变成可执行断言。若将来有人把口令写进日志，这一步会失败而不是悄悄写盘。",
+            "以字节形式回读 JSONL 与 .log，扫描口令明文、两种十六进制形式，以及真实网络派生出的 PMKID",
+            "两处日志均不含任何一份口令，也不含真实网络的 PMKID",
+            scan_detail,
+            ok_scan,
+            "" if ok_scan else "已删除日志，避免明文继续留存",
+        )
     if not ok_scan:
         for path in (rec.jsonl, rec.text):
             path.write_bytes(b"")
-    return 0 if rec.summary(time.perf_counter() - wall_start) else 1
+
+    ok_all = rec.summary(time.perf_counter() - wall_start)
+    if not ok_all:
+        return 1
+    _, _, suspended = rec.counts()
+    if suspended:
+        # Nothing failed, but one assertion was switched off, so this is not the clean bill that
+        # exit 0 stands for. Saying so in the exit code is the only way a wrapper script can
+        # repeat the caveat instead of printing "all passed" over the top of it.
+        print(f"\n本轮有 {suspended} 项暂停，退出码 {EXIT_SUSPENDED}："
+              f"没有任何步骤失败，但也不是干净通过。", file=sys.stderr)
+        return EXIT_SUSPENDED
+    return 0
 
 
 if __name__ == "__main__":

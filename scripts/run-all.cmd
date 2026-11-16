@@ -37,12 +37,27 @@ rem PYTHONPATH 会抢先于 .venv 里的 src，是最容易被忽略的“跑的不是这份代码”。
 if defined PYTHONPATH echo   PYTHONPATH : %PYTHONPATH%   注意：它会抢先于虚拟环境
 echo.
 
+rem 是否改用自己输入的目标。口令仍然只从文件路径读，提示里绝不要求直接打口令。
+rem 30 秒不选就当 N，这样双击打开的人走开也不会卡在这里。
+echo 是否输入自己的 SSID/BSSID 做实测（口令仍只从文件路径读，不在提示里打口令）?
+choice /c YN /n /t 30 /d N /m "  输入自己的 SSID/BSSID 实测 [Y/N]，30 秒不选按 N："
+if errorlevel 2 (
+    set "ASK="
+) else (
+    set "ASK=--ask-targets"
+)
+echo.
+
 echo 正在执行一键测试，日志写入 logs\ 目录...
-"%PY%" scripts\one_click_test.py %*
+if defined ASK echo   目标改为交互输入：验证阶段会逐条询问 SSID / BSSID / 口令文件路径
+rem 额外参数原样透传，例如 run-all.cmd --debug-plaintext 会把口令明文写到 .\logout.txt
+"%PY%" scripts\one_click_test.py %ASK% %*
 set RC=%ERRORLEVEL%
 echo.
 if "%RC%"=="0" (
     echo === 全部通过 ===
+) else if "%RC%"=="3" (
+    echo === 通过，但有断言按调试开关暂停；本轮不是干净通过，详见 logs\ 下的日志 ===
 ) else (
     echo === 存在失败阶段，退出码 %RC%，详见 logs\ 下的日志 ===
 )

@@ -53,7 +53,7 @@ uv sync --group dev
 scripts\run-all.cmd
 ```
 
-双击也行。它先打印**运行环境**（仓库根目录、Python 绝对路径、虚拟环境、版本、实际被 import 的 `wifit3` 目录，以及设置了的话还有 `PYTHONPATH`），再调用 `one_click_test.py`，最后打印「全部通过 / 存在失败阶段」、`pause` 住让你看结果，退出码透传。
+双击也行。它先打印**运行环境**（仓库根目录、Python 绝对路径、虚拟环境、版本、实际被 import 的 `wifit3` 目录，以及设置了的话还有 `PYTHONPATH`），再问一句**要不要用自己的 SSID/BSSID 实测**（30 秒不答按 N），然后调用 `one_click_test.py`，最后打印「全部通过 / 通过但有暂停项 / 存在失败阶段」、`pause` 住让你看结果，退出码透传。
 
 环境那几行是有用的：`wifit3` 目录若不在本仓库的 `src\` 下，说明跑的不是这份代码（editable 安装指向别处，或有 `PYTHONPATH` 抢先）。
 
@@ -66,7 +66,8 @@ scripts\run-all.cmd
 | `... one_click_test.py --include-slow` | +50 s | 连 `@pytest.mark.slow` 一起（WEP 端到端） | 动过 WEP / 加密相关 |
 | `... one_click_test.py --no-lint` | 省 0.5 s | 跳过 `ruff check` | 极少用 |
 
-其余开关：`--no-tests` / `--no-verify` / `--no-smoke` / `--progress {plain,bar,none}`。
+其余开关：`--no-tests` / `--no-verify` / `--no-smoke` / `--progress {plain,bar,none}` / `--ask-targets` / `--debug-plaintext [路径]`。
+后两个见第 3 节的「换目标」与「调试开关」。
 
 **输出长什么样**（下面是 `--fast` 的全部通过形态，实测）：
 
@@ -129,18 +130,70 @@ scripts\run-all.cmd
 
 | 文件 | 内容 |
 |---|---|
-| `logs\<日期>-设计意图验证.jsonl` | 每步一行，字段 `ts / step / title / intent / action / expected / actual / ok / detail / elapsed_ms / progress` |
+| `logs\<日期>-设计意图验证.jsonl` | 每步一行，字段 `ts / step / title / intent / action / expected / actual / ok / verdict / detail / elapsed_ms / progress` |
 | `logs\<日期>-设计意图验证.log` | 同上的中文可读版，含效率统计表 |
 
+`ok` 有三个取值，不是两个：`true` 通过、`false` 失败、`null` **暂停**（`verdict: "suspended"`，见下面的调试开关）。
+
 本机一次完整跑：**16 步 / 全 PASS / 端到端 2.3 s**，日志自报「进度计划 16/16 一致」。这个一致性是脚本自己断言的，不是人眼数的。
+
+**退出码**：`0` 全通过、`3` 没有失败但有步骤暂停、`1` 有失败、`2` 还没干活就拒绝了（例如缺口令）。`3` 是刻意与 `0` 分开的——「没有失败」不等于「干净通过」，包装脚本才有机会把这句话重复一遍而不是盖过去。
+
+### 换目标：不想维护 `targets.txt` 就手输
+
+```bat
+.venv\Scripts\python.exe scripts\verify_design_intent.py --psk-file .secrets\enhua_a.psk --ask-targets
+```
+
+逐条问 SSID / BSSID / 口令文件路径，BSSID 随便怎么写（`24-f6-03…`、`24f603…` 都收，统一成冒号形式）。三个细节值得知道：
+
+- **仍然只输路径，不输口令本身**。提示里打口令会进终端回滚缓冲，和写在命令行上一个性质。
+- 输入时就会和 `netsh wlan show interfaces` 的当前关联对账。BSSID 正是本机连着的那个、SSID 却填了别的名字，当场提醒——比等到第 13 步才发现早得多。
+- 标准输入不是终端时**直接拒绝**（`--ask-targets 需要交互式终端`）。管道会立刻读到 EOF，产出「零个目标」的假绿，看起来和「没东西可查」一模一样。
+
+`run-all.cmd` 里回答 Y 就是带着这个开关跑。
+
+### 调试开关：把明文写出来（默认关）
+
+```bat
+.venv\Scripts\python.exe scripts\verify_design_intent.py --psk-file .secrets\enhua_a.psk ^
+  --target "enhua:24:f6:03:27:76:cc" --debug-plaintext
+```
+
+默认写 `.\logout.txt`，也可以自己给路径。内容是**指纹到明文的对照**加**派生出的 PMKID**：
+
+```
+# 口令：指纹 -> 明文
+sha256[:12]=81d51827b5a2  ssid=demo-net  bssid=24:f6:03:27:76:cc  psk=<明文>
+# 派生 PMKID：可直接喂 hashcat -m 22000
+ssid=demo-net  bssid=24:f6:03:27:76:cc  sta=02:99:fa:94:70:aa  pmkid=<16 字节>
+```
+
+为什么需要它：日志只留 `sha256[:12]` 指纹，而指纹只能向「已经有口令的人」证明用的是哪份口令。真要事后核对，就得有明文。
+
+**打开后发生什么**（这是重点）：
+
+- 第 15 步「密钥不落地」变成 **SUSPENDED**，不是 PASS。要求本身没被违反，是**本轮不再执行这条要求**，所以不能报绿。
+- 汇总里出现「本轮 1 项暂停，既不算通过也不算失败」「本轮结论 PASS（含 1 项暂停，非干净通过）」，退出码是 **3**；`one_click_test.py` 记作 `PASS*`，`run-all.cmd` 打印「通过，但有断言按调试开关暂停」。
+- 日志本身**仍然照扫**。开关只豁免我们故意写的那份文件，不豁免日志：日志要是漏了明文，这一步照样判 FAIL。
+- 给的是仓库内路径而 `.gitignore` 没覆盖它，会在备注里点出来；`.\logout.txt` 已被 `.gitignore` 覆盖（`/logout.txt`、`/logout*.txt`）。
+- **核对完请删掉**。这个文件等于一份可直接离线爆破的 hash 加上它的口令。
+
+| `--debug-plaintext` | 第 15 步 | 退出码 | 含义 |
+|---|---|---|---|
+| 不给 | PASS（真扫描过） | 0 | 干净通过 |
+| 给，且本轮有口令 | SUSPENDED | 3 | 跳过该断言，明文在 `logout.txt` |
+| 给，但本轮没口令 | PASS | 0 | 没有可写的明文，照常断言 |
+| 给，且日志真漏了明文 | FAIL | 1 | 泄漏优先，不因开关而豁免 |
 
 ### 口令规矩（红线）
 
 - **口令永不出现在命令行上**。理由不是洁癖：argv 会进 shell 历史、进 `ps` / 任务管理器、进崩溃转储、进子进程环境。
 - 只有三种来源：`--psk-file <路径>`（推荐）、`--psk-stdin`、`--psk-prompt`（无回显）。
 - 日志里只有 `sha256[:12]` 指纹，明文、小写 hex、大写 hex 都不落盘。
-- 每次跑完会做一次**字节级回读扫描**：把日志按字节读回来，搜两份口令的三种形式加派生出的 PMKID，命中就把日志清空并判 FAIL。所以「不会写进日志」是可执行断言，不是口头承诺。
+- 每次跑完会做一次**字节级回读扫描**：把日志按字节读回来，搜两份口令的三种形式加派生出的 PMKID，命中就把日志清空并判 FAIL。所以「不会写进日志」是可执行断言，不是口头承诺。**唯一例外是 `--debug-plaintext`**：那条路把明文写到你自己指定的文件，扫描这步转为暂停而不是通过，见下面「调试开关」。
 - 口令文件放 `.secrets\`，该目录被 `.gitignore:42` 的 `.*` 覆盖，不会误提交。
+- 口令请用**真实的 8-63 字符**值。拿一个 1-2 字符的假口令跑，泄漏扫描按子串比对会命中文档里的普通字符，于是报 `命中明文` 判 FAIL，指纹也不再不可逆；脚本会先打一行提示说明这件事，别把它当成真泄漏。
 
 ---
 
