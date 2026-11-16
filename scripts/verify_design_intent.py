@@ -120,6 +120,12 @@ def _display_width(text: str) -> int:
     return sum(2 if ord(ch) > 0x2E80 else 1 for ch in text)
 
 
+def _pad(text: str, width: int, right: bool = False) -> str:
+    """Pad to a display width, not a character count, or CJK headers drift out of column."""
+    gap = max(0, width - _display_width(text))
+    return (" " * gap + text) if right else (text + " " * gap)
+
+
 def render_bar(done: int, total: int, width: int = 22, unicode_ok: bool = True) -> str:
     """The filled portion of the bar. Pure, so its shape is easy to reason about."""
     total = max(total, 1)
@@ -145,6 +151,7 @@ class ProgressBar:
         self._drawn = False
         self._t0 = time.perf_counter()
         is_tty = bool(getattr(stream, "isatty", lambda: False)())
+        self._tty = is_tty
         if mode == "none":
             self.enabled = False
         elif mode == "auto":
@@ -182,16 +189,26 @@ class ProgressBar:
                     f"{pct:3.0f}%  {done}/{total}  {elapsed:5.1f}s")
         if note:
             line += f"  {note}"
-        self._stream.write("\r" + self._fit(line) + "\x1b[K")
+        # A redraw only makes sense on a terminal. When the stream is a pipe, especially one a
+        # wrapper script is tee-ing to a file, a bare carriage return would shred the log, so
+        # plain mode emits one ordinary line per update instead.
+        if self.mode == "plain" and not self._tty:
+            self._stream.write(self._fit(line) + "\n")
+        else:
+            self._stream.write("\r" + self._fit(line) + "\x1b[K")
         self._stream.flush()
         self._drawn = True
 
     def clear_line(self) -> None:
-        """Blank the bar so the next block starts on a clean row."""
-        if self.enabled and self._drawn:
+        """Blank the bar so the next block starts on a clean row.
+
+        In plain mode on a pipe nothing was drawn in place, so there is nothing to blank and
+        writing an escape sequence would only pollute the captured log.
+        """
+        if self.enabled and self._drawn and not (self.mode == "plain" and not self._tty):
             self._stream.write("\r\x1b[K")
             self._stream.flush()
-            self._drawn = False
+        self._drawn = False
 
     def close(self) -> None:
         self.clear_line()
@@ -278,9 +295,10 @@ class Recorder:
         self._emit(bar)
         self._emit("效率统计")
         self._emit(bar)
-        self._emit(f"  {'步骤':<6}{'耗时':>10}   标题")
+        self._emit(f"  {_pad('步骤', 6)}{_pad('耗时', 10, right=True)}   标题")
         for r in sorted(self.rows, key=lambda x: -x["elapsed_ms"]):
-            self._emit(f"  {r['step']:<6}{r['elapsed_ms']:>8.0f} ms   {r['title']}")
+            cost = f"{r['elapsed_ms']:.0f} ms"
+            self._emit(f"  {_pad(r['step'], 6)}{_pad(cost, 10, right=True)}   {r['title']}")
         self._emit("")
         step_s = sum(r["elapsed_ms"] for r in self.rows) / 1000
         self._emit(f"  步骤累计      {step_s:>8.2f} s")
