@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>从设备发现到 campaign 判定的全流程</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --color-paper:  #1b2432;
+    --color-ink:    #f2f0ea;
+    --color-muted:  #a8b6c8;
+    --color-accent: #7fb2ec;
+    --color-rule:   rgba(242,240,234,0.12);
+    --font-sans:  'Geist', system-ui, sans-serif;
+    --font-serif: 'Instrument Serif', Georgia, serif;
+    --font-mono:  'Geist Mono', ui-monospace, monospace;
+  }
+  html, body { background: var(--color-paper); }
+  body {
+    font-family: var(--font-sans); color: var(--color-ink);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 3rem 2rem;
+  }
+  .frame { max-width: 1344px; width: 100%; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted);
+    margin-bottom: 0.5rem;
+  }
+  h1 {
+    font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.02em;
+    font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); line-height: 1.15;
+    color: var(--color-ink); margin-bottom: 1.5rem;
+  }
+  .diagram-container { width: 100%; overflow-x: auto; }
+  svg { width: 100%; min-width: 1280px; display: block; }
+  .note {
+    font-family: var(--font-mono); font-size: 0.66rem; color: var(--color-muted);
+    margin-top: 1rem; line-height: 1.7;
+  }
+  @media print {
+    .diagram-container { overflow-x: visible; }
+    svg { min-width: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <p class="eyebrow">Data flow · WiFit3</p>
+  <h1>从设备发现到 campaign 判定的全流程</h1>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-labelledby="2026-11-16-wifit3-attack-flow-dark-title 2026-11-16-wifit3-attack-flow-dark-desc" font-family="Geist, system-ui, sans-serif">
+      <title id="2026-11-16-wifit3-attack-flow-dark-title">从设备发现到 campaign 判定的全流程</title>
+      <desc id="2026-11-16-wifit3-attack-flow-dark-desc">一次主动攻击的完整闭环：发现设备、租约选卡、注入帧、空口应答、RX 解析、状态折叠、campaign 判定。</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#a8b6c8"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#7fb2ec"/></marker>
+      </defs>
+      <rect width="1280" height="720" fill="#1b2432"/>
+      <line x1="328" y1="224" x2="374" y2="224" stroke="#a8b6c8" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="616" y1="224" x2="662" y2="224" stroke="#a8b6c8" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="904" y1="224" x2="950" y2="224" stroke="#a8b6c8" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="1072" y1="272" x2="1072" y2="430" stroke="#a8b6c8" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+      <rect x="1084" y="342.0" width="72" height="18" fill="#1b2432"/>
+      <text x="1092" y="355.0" fill="#8b9bb0" font-size="9.5" font-family="Geist Mono, monospace" letter-spacing="0.08em">空口回传</text>
+      <line x1="952" y1="480" x2="906" y2="480" stroke="#a8b6c8" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="664" y1="480" x2="618" y2="480" stroke="#a8b6c8" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <path d="M1000,272 V314 Q1000,322 992,322 H792 Q784,322 784,314 V274" fill="none" stroke="#7fb2ec" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arrow-accent)"/>
+      <rect x="860" y="296" width="74" height="18" fill="#1b2432"/>
+      <text x="866" y="309" fill="#7fb2ec" font-size="9.5" font-family="Geist Mono, monospace" letter-spacing="0.08em">链路 ACK</text>
+      <rect x="88" y="176" width="240" height="96" rx="6" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="104" y="206" fill="#f2f0ea" font-size="13" font-weight="600">设备发现</text>
+      <text x="104" y="226" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">device.devices()</text>
+      <rect x="376" y="176" width="240" height="96" rx="6" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="392" y="206" fill="#f2f0ea" font-size="13" font-weight="600">选卡与租约</text>
+      <text x="392" y="226" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">WlanArray.lease()</text>
+      <rect x="664" y="176" width="240" height="96" rx="6" fill="rgba(127,178,236,0.10)" stroke="#7fb2ec" stroke-width="1.2"/>
+      <text x="680" y="206" fill="#7fb2ec" font-size="13" font-weight="600">注入帧</text>
+      <text x="680" y="226" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">inject_frame()</text>
+      <rect x="952" y="176" width="240" height="96" rx="6" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="968" y="206" fill="#f2f0ea" font-size="13" font-weight="600">空口 / 端口</text>
+      <text x="968" y="226" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">chips/* · sim</text>
+      <rect x="952" y="432" width="240" height="96" rx="6" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="968" y="462" fill="#f2f0ea" font-size="13" font-weight="600">RX tap 解析</text>
+      <text x="968" y="482" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">dot11.parser</text>
+      <rect x="664" y="432" width="240" height="96" rx="6" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="680" y="462" fill="#f2f0ea" font-size="13" font-weight="600">状态折叠</text>
+      <text x="680" y="482" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">WlanSink</text>
+      <rect x="376" y="432" width="240" height="96" rx="6" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="392" y="462" fill="#f2f0ea" font-size="13" font-weight="600">campaign 判定</text>
+      <text x="392" y="482" fill="#8b9bb0" font-size="10.5" font-family="Geist Mono, monospace">pin / wps / pmkid / wep</text>
+      <line x1="88" y1="646" x2="1192" y2="646" stroke="rgba(242,240,234,0.12)" stroke-width="1"/>
+      <rect x="88" y="669" width="14" height="14" rx="3" fill="#232e3f" stroke="rgba(195,203,214,0.25)" stroke-width="0.8"/>
+      <text x="112" y="680" fill="#a8b6c8" font-size="10.5" font-family="Geist Mono, monospace">层 / 模块</text>
+      <rect x="224" y="669" width="14" height="14" rx="3" fill="rgba(127,178,236,0.10)" stroke="#7fb2ec" stroke-width="0.8"/>
+      <text x="248" y="680" fill="#a8b6c8" font-size="10.5" font-family="Geist Mono, monospace">焦点：核心缝合层</text>
+      <line x1="384" y1="676" x2="412" y2="676" stroke="#a8b6c8" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <text x="422" y="680" fill="#a8b6c8" font-size="10.5" font-family="Geist Mono, monospace">主链路</text>
+    </svg>
+  </div>
+  <p class="note">链路 ACK 回路即为本次修复点：虚拟适配器此前不应答 ACK，导致 deauth 在仿真中恒报双方静默。</p>
+</div>
+</body>
+</html>

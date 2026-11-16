@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wifit3 分层架构</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --color-paper:  #f7f5f0;
+    --color-ink:    #1b2432;
+    --color-muted:  #4a5a72;
+    --color-accent: #1f5fa8;
+    --color-rule:   rgba(27,36,50,0.12);
+    --font-sans:  'Geist', system-ui, sans-serif;
+    --font-serif: 'Instrument Serif', Georgia, serif;
+    --font-mono:  'Geist Mono', ui-monospace, monospace;
+  }
+  html, body { background: var(--color-paper); }
+  body {
+    font-family: var(--font-sans); color: var(--color-ink);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 3rem 2rem;
+  }
+  .frame { max-width: 1344px; width: 100%; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted);
+    margin-bottom: 0.5rem;
+  }
+  h1 {
+    font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.02em;
+    font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); line-height: 1.15;
+    color: var(--color-ink); margin-bottom: 1.5rem;
+  }
+  .diagram-container { width: 100%; overflow-x: auto; }
+  svg { width: 100%; min-width: 1280px; display: block; }
+  .note {
+    font-family: var(--font-mono); font-size: 0.66rem; color: var(--color-muted);
+    margin-top: 1rem; line-height: 1.7;
+  }
+  @media print {
+    .diagram-container { overflow-x: visible; }
+    svg { min-width: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <p class="eyebrow">Architecture · WiFit3</p>
+  <h1>wifit3 分层架构</h1>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-labelledby="2026-11-16-wifit3-layered-architecture-title 2026-11-16-wifit3-layered-architecture-desc" font-family="Geist, system-ui, sans-serif">
+      <title id="2026-11-16-wifit3-layered-architecture-title">wifit3 分层架构</title>
+      <desc id="2026-11-16-wifit3-layered-architecture-desc">六层自上而下：TUI 交互、campaign 编排、wlan 会话、dot11 协议、chips 驱动、device 主机。</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4a5a72"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#1f5fa8"/></marker>
+      </defs>
+      <rect width="1280" height="720" fill="#f7f5f0"/>
+      <rect x="88" y="132" width="1104" height="60" rx="6" fill="#efece4" stroke="#c3cbd6" stroke-width="0.8"/>
+      <text x="112" y="159.0" fill="#1b2432" font-size="13" font-weight="600">交互层</text>
+      <text x="112" y="177.0" fill="#5f7089" font-size="10.5" font-family="Geist Mono, monospace">src/wifit3/ui  ·  Textual 屏 / focus_v2 / 组件</text>
+      <rect x="88" y="216" width="1104" height="60" rx="6" fill="#efece4" stroke="#c3cbd6" stroke-width="0.8"/>
+      <text x="112" y="243.0" fill="#1b2432" font-size="13" font-weight="600">编排层</text>
+      <text x="112" y="261.0" fill="#5f7089" font-size="10.5" font-family="Geist Mono, monospace">src/wifit3/campaigns  ·  deauth / pmkid / wps / wep / eviltwin</text>
+      <line x1="640" y1="192" x2="640" y2="214" stroke="#4a5a72" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="88" y="300" width="1104" height="60" rx="6" fill="rgba(31,95,168,0.08)" stroke="#1f5fa8" stroke-width="1.2"/>
+      <text x="112" y="327.0" fill="#1f5fa8" font-size="13" font-weight="600">会话层</text>
+      <text x="112" y="345.0" fill="#5f7089" font-size="10.5" font-family="Geist Mono, monospace">src/wifit3/wlan  ·  WlanArray / WlanInterface / Lease</text>
+      <line x1="640" y1="276" x2="640" y2="298" stroke="#4a5a72" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="88" y="384" width="1104" height="60" rx="6" fill="#efece4" stroke="#c3cbd6" stroke-width="0.8"/>
+      <text x="112" y="411.0" fill="#1b2432" font-size="13" font-weight="600">协议层</text>
+      <text x="112" y="429.0" fill="#5f7089" font-size="10.5" font-family="Geist Mono, monospace">src/wifit3/dot11  ·  parser / 帧构造器 / WPA·WEP 密码学</text>
+      <line x1="640" y1="360" x2="640" y2="382" stroke="#1f5fa8" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+      <rect x="88" y="468" width="1104" height="60" rx="6" fill="#efece4" stroke="#c3cbd6" stroke-width="0.8"/>
+      <text x="112" y="495.0" fill="#1b2432" font-size="13" font-weight="600">驱动层</text>
+      <text x="112" y="513.0" fill="#5f7089" font-size="10.5" font-family="Geist Mono, monospace">src/wifit3/chips  ·  Driver 抽象基类 + 各芯片端口（576 文件）</text>
+      <line x1="640" y1="444" x2="640" y2="466" stroke="#4a5a72" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="88" y="552" width="1104" height="60" rx="6" fill="#efece4" stroke="#c3cbd6" stroke-width="0.8"/>
+      <text x="112" y="579.0" fill="#1b2432" font-size="13" font-weight="600">主机层</text>
+      <text x="112" y="597.0" fill="#5f7089" font-size="10.5" font-family="Geist Mono, monospace">src/wifit3/device  ·  USB 后端 / PnP / 热插拔 / 板载 CNVi 探测</text>
+      <line x1="640" y1="528" x2="640" y2="550" stroke="#4a5a72" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <line x1="88" y1="646" x2="1192" y2="646" stroke="rgba(27,36,50,0.12)" stroke-width="1"/>
+      <rect x="88" y="669" width="14" height="14" rx="3" fill="#efece4" stroke="#c3cbd6" stroke-width="0.8"/>
+      <text x="112" y="680" fill="#4a5a72" font-size="10.5" font-family="Geist Mono, monospace">层 / 模块</text>
+      <rect x="224" y="669" width="14" height="14" rx="3" fill="rgba(31,95,168,0.08)" stroke="#1f5fa8" stroke-width="0.8"/>
+      <text x="248" y="680" fill="#4a5a72" font-size="10.5" font-family="Geist Mono, monospace">焦点：核心缝合层</text>
+      <line x1="384" y1="676" x2="412" y2="676" stroke="#4a5a72" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <text x="422" y="680" fill="#4a5a72" font-size="10.5" font-family="Geist Mono, monospace">主链路</text>
+    </svg>
+  </div>
+  <p class="note">会话层为焦点：它是唯一同时持有硬件句柄与 campaign 语义的一层，也是本次租约与 ACK 修复的落点。</p>
+</div>
+</body>
+</html>

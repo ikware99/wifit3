@@ -50,3 +50,6 @@ scripts/wps/lab_results.jsonl
 !.claude/commands/
 # ...but the /sweep skill is private to this machine (references local APs/config) — keep it local.
 .claude/skills/sweep/
+
+# Verification run logs (never committed: may name a live network)
+logs/
