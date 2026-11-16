@@ -346,6 +346,30 @@ def build_m7_enrollee(nonce_r: bytes, e_s2: bytes, authkey: bytes,
     return body + tlv(ATTR_AUTHENTICATOR, wc.authenticator(authkey, m6_attrs, body))
 
 
+def build_m7_credential(nonce_r: bytes, ssid: bytes, network_key: bytes, mac_addr: bytes,
+                        authkey: bytes, keywrapkey: bytes, m6_attrs: bytes) -> bytes:
+    """M7 carrying the network credential, as an AP-enrollee sends it in a PIN exchange.
+
+    ``build_m7_enrollee`` is the PBC shape: it reveals E-S2 and the registrar answers with M8
+    holding the credential. The PIN attack has the opposite polarity (the AP is the enrollee),
+    so the credential itself travels here, flat, which is what ``extract_m7_credentials`` reads.
+    """
+    inner = (
+        tlv(ATTR_SSID, ssid)
+        + tlv_u16(ATTR_AUTH_TYPE, 0x0020)     # WPA2-PSK
+        + tlv_u16(ATTR_ENCR_TYPE, 0x0008)     # AES
+        + tlv(ATTR_NETWORK_KEY, network_key)
+        + tlv(ATTR_MAC_ADDR, mac_addr)
+        + tlv_u8(ATTR_NETWORK_INDEX, 1)
+    )
+    body = (
+        _version_and_type(WPS_M7)
+        + tlv(ATTR_REGISTRAR_NONCE, nonce_r)
+        + tlv(ATTR_ENCR_SETTINGS, _encr_settings(authkey, keywrapkey, inner))
+    )
+    return body + tlv(ATTR_AUTHENTICATOR, wc.authenticator(authkey, m6_attrs, body))
+
+
 def build_wsc_done(nonce_e: bytes, nonce_r: bytes) -> bytes:
     return (
         _version_and_type(WPS_WSC_DONE)

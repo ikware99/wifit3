@@ -20,6 +20,8 @@ from wifit3.dot11.ie import ds_param_ie, rates_ie, ssid_ie
 from wifit3.dot11.mac import mac_header, str_to_mac
 from wifit3.dot11.wpa import derive_pmk
 
+from .wps import VirtualWpsEnrollee
+
 logger = logging.getLogger(__name__)
 
 BROADCAST = b"\xff\xff\xff\xff\xff\xff"
@@ -90,6 +92,7 @@ class VirtualAccessPoint:
     psk: str = "simulated-passphrase"
     akm: Optional[int] = 0x02        # None = open network (no RSN IE)
     m1_delay: float = 0.0
+    wps_pin: Optional[str] = None    # None = WPS disabled, as most hardened APs ship it
 
     def __post_init__(self) -> None:
         self.bssid_bytes = str_to_mac(self.bssid)
@@ -130,6 +133,13 @@ class VirtualRadio:
         # Stations this air has actually heard from. A unicast frame is only ACKed by an addressee
         # that exists, so de-authing an address nobody has talked to correctly draws silence.
         self._stations: set[str] = set()
+        # One WSC session per client address. Keyed by station, because a sweeper runs one
+        # exchange at a time but the air may carry several clients.
+        self._wps: Dict[str, VirtualWpsEnrollee] = {}
+
+    def wps_session(self, client: str) -> Optional[VirtualWpsEnrollee]:
+        """The WSC state for ``client``, or None if it never started one."""
+        return self._wps.get(str_to_mac(client).hex(":"))
 
     def add_station(self, mac: str) -> None:
         """Put ``mac`` in range so unicast frames addressed to it are ACKed."""
@@ -157,13 +167,14 @@ class VirtualRadio:
         if len(frame) < 24:
             return []
         fc0 = frame[0]
-        if (fc0 & 0x0C) >> 2 != 0:          # type 0 = management; data/control get no answer
+        frame_type = (fc0 & 0x0C) >> 2      # 0 = management, 2 = data; control gets no answer
+        if frame_type not in (0, 2):
             return []
         subtype = (fc0 & 0xF0) >> 4
         dest, source = frame[4:10], frame[10:16]
         dest_str = dest.hex(":")
 
-        if subtype == 4:                     # Probe Request: every AP on this channel answers
+        if frame_type == 0 and subtype == 4:  # Probe Request: every AP on this channel answers
             self._stations.add(source.hex(":"))
             return [probe_resp(ap, source)
                     for ap in self.aps if channel is None or ap.channel == channel]
@@ -180,7 +191,9 @@ class VirtualRadio:
         if ap is None:
             return replies
         self._stations.add(source.hex(":"))
-        if subtype == 11:                    # Authentication
+        if frame_type == 2:                  # data: possibly one EAPOL step of a WPS exchange
+            replies.extend(self._wps_replies(ap, frame, source))
+        elif subtype == 11:                  # Authentication
             replies.append(auth_resp(ap.bssid_bytes, source))
         elif subtype in (0, 2):              # (Re)Association Request
             replies.append(assoc_resp(ap.bssid_bytes, source, channel=ap.channel,
@@ -188,6 +201,26 @@ class VirtualRadio:
             if ap.sends_m1:
                 replies.append(ap.m1(source))
         return replies
+
+    def _wps_replies(self, ap: VirtualAccessPoint, frame: bytes,
+                     source: bytes) -> List[bytes]:
+        """Advance this client's WSC exchange by one message, if the AP offers WPS at all.
+
+        A data frame with no EAPOL is ordinary traffic (ARP, DHCP) and draws nothing beyond the
+        ACK above. Only an AP with ``wps_pin`` set answers WSC, which mirrors reality: an AP with
+        WPS off is indistinguishable from a silent one on this path.
+        """
+        if ap.wps_pin is None or LLC_SNAP_EAPOL not in frame:
+            return []
+        key = source.hex(":")
+        session = self._wps.get(key)
+        if session is None:
+            session = VirtualWpsEnrollee(ap.bssid_bytes, ap.ssid, ap.psk, ap.wps_pin,
+                                         ap.channel)
+            self._wps[key] = session
+        return [data_header(to_ds=False, bssid=ap.bssid_bytes, client=source)
+                + LLC_SNAP_EAPOL + payload
+                for payload in session.feed(frame)]
 
     def emit(self, frames: List[bytes]) -> int:
         """Push ``frames`` into the RX tap; returns how many were handed over."""

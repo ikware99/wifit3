@@ -42,9 +42,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from wifit3.campaigns.pmkid import PmkidHarvestAttack                      # noqa: E402
+from wifit3.campaigns.wps.registrar import PinResult, WpsRegistrar       # noqa: E402
 from wifit3.chips.sim import SIM_PID, SIM_VID                            # noqa: E402
 from wifit3.chips.sim.backend import reset_usb_backend, use_sim_backend   # noqa: E402
 from wifit3.chips.sim.driver import SimulatedDriver                      # noqa: E402
+from wifit3.chips.sim.radio import VirtualAccessPoint, VirtualRadio       # noqa: E402
 from wifit3.crack.hc22000_format import parse_hc22000                    # noqa: E402
 from wifit3.crack.wpa_psk import derive_pmk, pmkid as pmkid_of, psk_matches             # noqa: E402
 from wifit3.device import manager                                        # noqa: E402
@@ -385,6 +387,29 @@ async def wait_for(pred, rounds: int = 80, step: float = 0.05) -> bool:
     return False
 
 
+class Loopback:
+    """Carries a registrar's frames into a virtual radio and the answers back.
+
+    The virtual air replies synchronously, so ``recv`` never waits: an empty inbox means the AP
+    is silent, which is exactly what the registrar's timeout logic is there to detect.
+    """
+
+    def __init__(self, radio: VirtualRadio, channel: int) -> None:
+        self.radio = radio
+        self.channel = channel
+        self.inbox: list[bytes] = []
+
+    async def send_no_wait(self, frame: bytes) -> None:
+        self.inbox.extend(self.radio.handle_tx(frame, self.channel))
+
+    async def send_until_ack(self, frame: bytes, max_retries: int = 0) -> bool:
+        self.inbox.extend(self.radio.handle_tx(frame, self.channel))
+        return True
+
+    async def recv(self, timeout: float):
+        return self.inbox.pop(0) if self.inbox else None
+
+
 def mac_hex(text: str) -> str:
     """Normalise any MAC spelling (colons, dashes, dots) to 12 lowercase hex digits."""
     return re.sub(r"[^0-9A-Fa-f]", "", text or "").lower()
@@ -486,10 +511,10 @@ async def main(argv: list[str] | None = None) -> int:
     # one is a ready-made offline-crackable target. They are collected here only so the closing
     # leak scan can assert that none of them reached the disk.
     derived_pmkids: list[str] = []
-    # Ten fixed steps, one reconciliation per device, one cross-check against the host's own
+    # Eleven fixed steps, one reconciliation per device, one cross-check against the host's own
     # association, one leak scan. The summary re-checks this number against what was emitted,
     # so a step added without updating it turns the run red rather than lying in the bar.
-    planned = 10 + len(per_target) + (1 if per_target else 0) + 1
+    planned = 11 + len(per_target) + (1 if per_target else 0) + 1
     rec = Recorder(ROOT / "logs", Redactor(secrets), total=planned, progress=args.progress)
     rec.head("wifit3 设计意图端到端验证",
              "无 USB Wi-Fi 卡前提下，靠虚拟通道把产品链路跑到可破解的 hash 行")
@@ -657,7 +682,39 @@ async def main(argv: list[str] | None = None) -> int:
             res.measured and res.client_acks == 2 and res.ap_acks == 2,
         )
 
-        # -- S11..S11+n：逐台真实设备对账 -----------------------------------
+        # -- S11：WPS PIN 端到端 ---------------------------------------------
+        rec.mark()
+        wps_radio = VirtualRadio()
+        wps_pin, wps_psk = "12345670", "sim-wps-passphrase"
+        wps_ap = wps_radio.add_ap(VirtualAccessPoint(
+            ssid="sim-wps", bssid="02:00:5e:1a:00:02", channel=6, psk=wps_psk,
+            wps_pin=wps_pin))
+
+        async def _wps_attempt(pin: str, client_mac: str):
+            radio = VirtualRadio()
+            radio.add_ap(VirtualAccessPoint(ssid="sim-wps", bssid="02:00:5e:1a:00:02",
+                                            channel=6, psk=wps_psk, wps_pin=wps_pin))
+            reg = WpsRegistrar(Loopback(radio, 6), wps_ap.bssid_bytes,
+                               bytes.fromhex(client_mac.replace(":", "")), 6, False,
+                               msg_timeout=0.1, eapol_start_timeout=0.1, overall_timeout=3.0)
+            return await reg.try_pin(pin), radio
+
+        good, good_radio = await _wps_attempt(wps_pin, "02:11:22:33:44:77")
+        bad, _ = await _wps_attempt("9999" + wps_pin[4:], "02:11:22:33:44:78")
+        rec.step(
+            "WPS PIN：虚拟适配器补齐 AP 的 Enrollee 一侧",
+            "PIN 战役要求 AP 扮演 Enrollee 发 M1/M3/M5/M7，wifit3 作外部注册器。虚拟空口此前"
+            "不应答 WSC，campaign 每次都等到超时、把所有 PIN 判错。验证现在能真正跑完。",
+            "WpsRegistrar 打到虚拟空口两次：一次正确 PIN，一次前半错的 PIN",
+            "正确 → SUCCESS 且拿到网络口令；错 → FIRST_HALF_WRONG 且拿不到口令",
+            f"正确={good.result.name}/口令{'已获取' if good.psk else '未获取'}，"
+            f"错误={bad.result.name}",
+            good.result is PinResult.SUCCESS and good.psk == wps_psk
+            and bad.result is PinResult.FIRST_HALF_WRONG and bad.psk is None,
+            "负向那半是必须的：只测正确 PIN 会放过一个「永远说对」的假 AP",
+        )
+
+        # -- S12..：逐台真实设备对账 -----------------------------------------
         # 每台设备一个独立步骤，而不是合成一步：任何一台失败都必须单独可见，
         # 否则「两台都跑了」与「只跑通一台」在日志里长得一样。
         client_hex = bytes.fromhex(attack.client_mac.replace(":", ""))
