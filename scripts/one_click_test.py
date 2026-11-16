@@ -33,8 +33,24 @@ TARGETS_FILE = ROOT / ".secrets" / "targets.txt"
 # A healthy table is ~58k prefixes. The floor is deliberately loose: it is here to catch a
 # truncated or dropped table, not to fail whenever Wireshark's feed shifts by a few hundred.
 MIN_OUI_ENTRIES = 40000
-BAR_FULL = "█"
-BAR_EMPTY = "░"
+
+
+def _encodable(text: str) -> bool:
+    """Can the current stdout carry this glyph?
+
+    A Windows console redirected to a file, or one whose code page is 936, cannot represent
+    U+2591: printing it raises UnicodeEncodeError and kills a run that was otherwise finished.
+    The bar is decoration, so it degrades to ASCII instead of taking the whole report down.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
+BAR_FULL, BAR_EMPTY = ("█", "░") if _encodable("█") and _encodable("░") else ("#", "-")
 
 # The subset that covers everything this branch touched, for a check that finishes while you
 # wait. It is a convenience, never the release gate: a green --fast run proves less than a full
@@ -266,7 +282,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+def harden_stdout() -> None:
+    """Never die on an unencodable glyph.
+
+    A stray box character or a redaction mark should not turn a completed test run into a
+    traceback: degraded output beats no output. The bar itself degrades gracefully above, so
+    this is the safety net for everything else that gets printed.
+    """
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(errors="replace")
+    except (ValueError, OSError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    harden_stdout()
     args = parse_args(argv)
     py = venv_python()
     stamp = datetime.datetime.now().strftime("%Y-%m-%d")

@@ -488,7 +488,23 @@ def parse_targets(args: argparse.Namespace) -> list[tuple[str, str, str | None]]
     return out
 
 
+def harden_stdout() -> None:
+    """Keep an unencodable glyph from killing a run that already did its work.
+
+    The bar degrades on its own (``render_bar``); this covers everything else, notably the
+    redaction marks in ``REDACTED``, which a cp936 console cannot encode.
+    """
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(errors="replace")
+    except (ValueError, OSError):
+        pass
+
+
 async def main(argv: list[str] | None = None) -> int:
+    harden_stdout()
     args = parse_args(argv)
     shared = read_secret(args)
     targets = parse_targets(args)

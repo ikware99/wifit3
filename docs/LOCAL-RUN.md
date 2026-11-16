@@ -53,14 +53,16 @@ uv sync --group dev
 scripts\run-all.cmd
 ```
 
-双击也行。它做的事就是切到仓库根目录、检查 `.venv`、调用 `one_click_test.py`、打印「全部通过 / 存在失败阶段」、`pause` 住让你看结果，退出码透传。
+双击也行。它先打印**运行环境**（仓库根目录、Python 绝对路径、虚拟环境、版本、实际被 import 的 `wifit3` 目录，以及设置了的话还有 `PYTHONPATH`），再调用 `one_click_test.py`，最后打印「全部通过 / 存在失败阶段」、`pause` 住让你看结果，退出码透传。
+
+环境那几行是有用的：`wifit3` 目录若不在本仓库的 `src\` 下，说明跑的不是这份代码（editable 安装指向别处，或有 `PYTHONPATH` 抢先）。
 
 等价的手动调用与耗时（本机实测）：
 
 | 命令 | 耗时 | 跑什么 | 用途 |
 |---|---|---|---|
 | `... one_click_test.py` | 88 s | 环境 / ruff / 指纹库 / pytest 全量 / 设计意图链 | 提交前 |
-| `... one_click_test.py --fast` | 18 s | 只跑改动涉及的核心子集（约 677 用例） | 改一行就想知道有没有炸 |
+| `... one_click_test.py --fast` | 18 s | 只跑改动涉及的核心子集（678 用例） | 改一行就想知道有没有炸 |
 | `... one_click_test.py --include-slow` | +50 s | 连 `@pytest.mark.slow` 一起（WEP 端到端） | 动过 WEP / 加密相关 |
 | `... one_click_test.py --no-lint` | 省 0.5 s | 跳过 `ruff check` | 极少用 |
 
@@ -73,7 +75,7 @@ scripts\run-all.cmd
   1   环境自检                  PASS       1.7s   一切就绪
   2   静态检查（ruff）          PASS       0.5s   全部通过
   3   指纹库自检                PASS       0.9s   58407 条 OUI
-  4   回归测试（pytest）        PASS      11.5s   677 passed in 8.84s
+  4   回归测试（pytest）        PASS      11.5s   678 passed in 8.8s
   5   设计意图验证              PASS       3.2s   16/16 步通过
 ------------------------------------------------------------------------------
       总计                      PASS      18.0s
@@ -89,6 +91,7 @@ scripts\run-all.cmd
 2. 全量跑出现这两个红，是**既有失败**，不计入本轮改动：
    - `tests/chips/rtl8188ftv_dkms/test_driver.py::test_watchdog_loop_skips_faulty_tick`（HEAD 即失败）
    - `tests/campaigns/test_wps_association.py::test_falls_back_to_assoc_when_no_auth_resp`（0.05 s 超时撞 Windows 15.6 ms 计时粒度，多次实测多数时候通过、偶尔红；已用干净 worktree 证明 HEAD 同样会红，样本不大，不作精确概率声明）
+   - `tests/chips/sim/test_product_journey.py::test_the_journey_measures_link_acks_on_the_deauth_path`（异步数 ACK，负载下可能少计一轮。实测：隔离单跑 8/8 通过、fast 子集直跑 3/3 通过，仅在 one_click 子进程负载下见过 1 次失败；不是本轮改动引入，但也没修，先记在这里）
 
 ---
 
@@ -287,6 +290,10 @@ gh api repos/ikware99/wifit3/git/ref/heads/master
 **中文路径处理失败**。`git ls-tree` 默认把非 ASCII 路径转义成八进制，脚本匹配不到文件。所有 git 调用加 `-c core.quotepath=false`。
 
 **`.cmd` 文件乱码**。`scripts\run-all.cmd` 必须是 **GB18030** 编码（`cmd.exe` 按系统代码页读），不要另存为 UTF-8，也不要加 `chcp 65001`。用 UTF-8 编辑器打开看到乱码是正常的，不代表文件坏了。
+
+**改 `.cmd` 时 `for /f` 抓不到 Python 输出**。`for /f "delims=" %%v in ('"%PY%" -c "..."')` 会因为引号被重新解析，把命令截断成 `"...python.exe" -c "import`，报「不是内部或外部命令」。要么别用 `for /f`（直接让 Python 打印到控制台），要么走临时文件加 `set /p`。注意临时文件那条路只对纯 ASCII 安全：Python 重定向时写 UTF-8，`echo` 按控制台代码页输出，中文路径过一遍就变乱码。
+
+**重定向后进度条变成 `####`**。不是坏了：`░` 在 CP936（中文 Windows 控制台/重定向）里无法编码，脚本检测到就自动降级成 `#` 和 `-`，否则会在收尾阶段抛 `UnicodeEncodeError` 把整轮结果吞掉。终端里仍是方块。
 
 **改完日志出现 `\r`**。Windows 文本模式会把 `\n` 写成 `\r\n`，导致「无进度残留」这类断言失效。写日志必须显式 `newline="\n"`，判定要用字节计数：
 
