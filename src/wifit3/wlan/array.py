@@ -164,12 +164,23 @@ class WlanArray:
         return min(cands, key=fake_mac_rank)
 
     def lease(self, channel=None, fake_mac=None, bssid=None, ack_tally=False, iface=None) -> Lease:
-        """Scoped hold on one interface (selected by ``channel`` unless ``iface`` is given).
-        Restores channel, fake MAC and ACK tally on exit; raises when no interface can serve."""
-        target = iface
-        if target is None and channel is not None:
+        """Scoped hold on one interface. Restores channel, fake MAC and ACK tally on exit.
+
+        Target selection has three distinct cases, and conflating them silently hands back a card
+        that cannot reach the target band:
+
+        - ``iface`` given: hold exactly that card.
+        - ``channel`` given: hold a card that can reach it, or raise. Falling back to
+          ``members[0]`` here would put a 5 GHz campaign on a 2.4 GHz-only card.
+        - neither given: any card will do, so fall back to the first member.
+        """
+        if iface is not None:
+            target = iface
+        elif channel is not None:
             target = self.select_iface(channel)
-        if target is None:
+            if target is None:
+                raise RuntimeError(f"no interface can reach channel {channel}")
+        else:
             target = self._members[0] if self._members else None
         if target is None:
             raise RuntimeError("no interface available to lease")

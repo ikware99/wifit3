@@ -1,7 +1,10 @@
 """A campaign's scoped hold on one interface: apply config on enter, restore it on exit."""
 from __future__ import annotations
 
-from typing import Any, Optional
+import logging
+from typing import Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Sentinel for ``fake_mac``: let the driver pick a random locally-administered MAC
 # (SPOOFABLE cards) or fall back to the card's own MAC (FIXED_MAC cards).
@@ -41,12 +44,16 @@ class Lease:
         return self._own_mac
 
     async def _exit_active_monitor(self) -> None:
-        if self._in_active_monitor:
-            await self.iface.clear_fake_mac()
-        if self._own_mac is not None:
-            self._array.unregister_own_mac(self._own_mac)
-        self._in_active_monitor = False
-        self._own_mac = None
+        try:
+            if self._in_active_monitor:
+                await self.iface.clear_fake_mac()
+        finally:
+            # The array's own-MAC registration must be released even when the card refused the
+            # clear: a stale entry makes ingest drop frames we never sent.
+            if self._own_mac is not None:
+                self._array.unregister_own_mac(self._own_mac)
+            self._in_active_monitor = False
+            self._own_mac = None
 
     async def __aenter__(self):
         self._orig_channel = self.iface.current_channel
@@ -58,12 +65,35 @@ class Lease:
             await self.iface.enable_rx_acks()
         return self.iface
 
-    async def __aexit__(self, *exc) -> bool:
+    async def __aexit__(self, exc_type=None, exc=None, tb=None) -> bool:
+        """Restore everything the lease changed, even when one restore step fails.
+
+        A card can be unplugged mid-lease, and then the first restore raises (usually a USBError
+        from the ACK-tally write). Running the three steps unguarded would skip the other two,
+        leaving the own-MAC registered and the card parked on the target channel. Each step is
+        isolated instead; the first failure is raised afterwards, but only when the body itself
+        did not raise, so cleanup never masks the original error.
+        """
+        failures: List[Exception] = []
         if self._ack_tally:
-            await self.iface.disable_rx_acks()
-        await self._exit_active_monitor()
+            try:
+                await self.iface.disable_rx_acks()
+            except Exception as error:
+                failures.append(error)
+        try:
+            await self._exit_active_monitor()
+        except Exception as error:
+            failures.append(error)
         if self._channel is not None and self._orig_channel is not None:
-            await self.iface.set_channel(self._orig_channel)
+            try:
+                await self.iface.set_channel(self._orig_channel)
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            logger.warning("lease on %s restored with %d error(s): %s",
+                           getattr(self.iface, "name", self.iface), len(failures), failures)
+            if exc_type is None:
+                raise failures[0]
         return False
 
     async def acquire(self):

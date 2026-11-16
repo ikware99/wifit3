@@ -7,6 +7,8 @@ into the shared sink, STACK set_channel, SPREAD hop partitioning, and member-los
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from wifit3.chips.driver import FakeMacSupport
 from wifit3.wlan.array import WlanArray
 
@@ -446,3 +448,34 @@ async def test_claim_when_not_hopping_is_inert():
     async with a.claim(m1) as claimed:
         assert claimed is m1
     assert m1.hop_calls == []
+
+
+# ----- lease target selection ------------------------------------------------
+# These four guard the three-way branch in `lease()`. Conflating "channel given but
+# unreachable" with "no channel given" used to hand back members[0], silently putting a
+# 5 GHz campaign on a 2.4 GHz-only card.
+
+def test_lease_without_a_channel_falls_back_to_the_first_member():
+    two4 = FakeIface("wlan0", [1, 6, 11])
+    a = _pool(two4)
+    lease = a.lease()                      # no channel, no iface: any card will do
+    assert lease.iface is two4
+
+
+def test_lease_raises_when_no_member_can_reach_the_channel():
+    a = _pool(FakeIface("wlan0", [1, 6, 11]))
+    with pytest.raises(RuntimeError, match="no interface can reach channel 44"):
+        a.lease(channel=44)
+
+
+def test_lease_raises_when_the_array_is_empty():
+    a = WlanArray()
+    with pytest.raises(RuntimeError, match="no interface available to lease"):
+        a.lease()
+
+
+async def test_lease_honours_an_explicit_iface_over_the_channel_check():
+    two4 = FakeIface("wlan0", [1, 6, 11])
+    a = _pool(two4)
+    lease = a.lease(channel=44, iface=two4)   # caller took responsibility for the target
+    assert lease.iface is two4
