@@ -323,7 +323,9 @@ def _linux_driver(iface: str) -> str:
     """The kernel module bound to ``iface``: the ``device/driver`` symlink, else ethtool."""
     link = Path(f"/sys/class/net/{iface}/device/driver")
     try:
-        return link.resolve().name
+        # readlink, not resolve(): resolve(strict=False) returns the literal "driver" when the
+        # symlink is absent (any virtual interface), which then skips the ethtool fallback.
+        return os.path.basename(os.readlink(link))
     except OSError:
         pass
     if shutil.which("ethtool"):

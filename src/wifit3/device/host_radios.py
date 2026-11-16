@@ -183,9 +183,13 @@ def probe_windows() -> List[HostRadio]:
 
 # ---- Linux ----------------------------------------------------------------
 
-def probe_linux() -> List[HostRadio]:
+def probe_linux(root: Optional[Path] = None) -> List[HostRadio]:
+    """Intel PCI functions under ``root`` (default ``/sys/bus/pci/devices``).
+
+    ``root`` is a parameter so a fabricated sysfs tree can exercise the parsing offline.
+    """
     radios: List[HostRadio] = []
-    root = Path("/sys/bus/pci/devices")
+    root = Path("/sys/bus/pci/devices") if root is None else root
     if not root.is_dir():
         return radios
     for entry in sorted(root.iterdir()):
@@ -204,7 +208,9 @@ def probe_linux() -> List[HostRadio]:
         driver = ""
         link = entry / "driver"
         try:
-            driver = link.resolve().name
+            # readlink, not resolve(): resolve(strict=False) hands back the literal "driver" when
+            # the symlink is absent, which would be reported as a bound driver named "driver".
+            driver = os.path.basename(os.readlink(link))
         except OSError:
             pass
         radio = HostRadio(vendor=vendor, device=device, subsystem_vendor=sub_vendor,

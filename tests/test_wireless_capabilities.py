@@ -143,8 +143,18 @@ def test_parse_capabilities_english_wording():
 
 
 def test_parse_capabilities_ignores_the_system_section():
-    text = "无线系统功能\n----------------------------\n    共存支持 : 未知\n" + NETSH_CAPS_ZH
-    assert "WLAN" in wc.parse_capabilities(text)
+    """``无线系统功能`` precedes the device block and repeats labels; its values must not leak.
+
+    Note the operative guard is ``current is None`` (nothing is attributed before the first
+    ``接口名称``), not the ``started`` flag: the flag is redundant defence, and no realistic
+    netsh output can tell the two apart, so this asserts the contract rather than either guard.
+    """
+    text = ("无线系统功能\n----------------------------\n    动作帧 : 支持\n    共存支持 : 未知\n"
+            "无线设备功能\n----------------------------\n接口名称: WLAN\n"
+            "    网络监视模式 : 不支持\n")
+    caps = wc.parse_capabilities(text)
+    assert caps["WLAN"]["monitor_mode"].value is False
+    assert "action_frames" not in caps["WLAN"]      # only the device block may contribute
 
 
 def test_parse_interfaces_reads_the_adapter_identity():
@@ -276,3 +286,121 @@ def test_display_width_counts_cjk_as_two_cells():
     assert wc.display_width("abc") == 3
     assert wc.display_width("网络") == 4
     assert wc.pad("网络", 6) == "网络  "
+
+
+# ---- the probe orchestration ------------------------------------------------
+# The parsers above are pure and well covered; these cover the layer that actually runs the
+# console tools, because that is the only path a user invokes and it can fail in ways the
+# parsers never see (service stopped, tool missing, no interface, wrong encoding).
+
+def _fake_run(monkeypatch, mapping):
+    """Make ``_run`` answer per-argument-prefix from ``mapping`` and record the calls."""
+    calls = []
+
+    def fake(args):
+        calls.append(list(args))
+        return mapping.get(tuple(args), "")
+
+    monkeypatch.setattr(wc, "_run", fake)
+    return calls
+
+
+def test_probe_windows_reports_a_stopped_wireless_service(monkeypatch):
+    _fake_run(monkeypatch, {})
+    report = wc.probe_windows()
+    assert "WLAN AutoConfig" in report.error
+    assert report.adapters == []
+
+
+def test_probe_windows_falls_back_to_capabilities_when_no_interface_is_up(monkeypatch):
+    """A radio in a disconnected state still reports capabilities under its own name."""
+    _fake_run(monkeypatch, {("netsh", "wlan", "show", "wirelesscapabilities"): NETSH_CAPS_ZH})
+    report = wc.probe_windows()
+    assert report.error == ""
+    assert [a.name for a in report.adapters] == ["WLAN"]
+    assert report.adapters[0].verdict is wc.Verdict.FIRMWARE_REFUSED
+
+
+def test_probe_windows_merges_the_driver_block_and_quotes_evidence(monkeypatch):
+    _fake_run(monkeypatch, {
+        ("netsh", "wlan", "show", "wirelesscapabilities"): NETSH_CAPS_ZH,
+        ("netsh", "wlan", "show", "interfaces"): NETSH_IFACES_ZH,
+        ("netsh", "wlan", "show", "drivers"): NETSH_DRIVERS_ZH,
+    })
+    adapter = wc.probe_windows().adapters[0]
+    assert adapter.driver == "Intel(R) Wireless-AC 9462"
+    assert adapter.driver_version == "23.60.1.2"
+    assert adapter.driver_inf == "oem243.inf"
+    assert adapter.driver_provider == "Intel"
+    assert any(e.startswith("driver: ") and "oem243.inf" in e for e in adapter.evidence)
+    assert adapter.verdict is wc.Verdict.FIRMWARE_REFUSED
+
+
+def test_probe_windows_notes_npcap_absence(monkeypatch):
+    _fake_run(monkeypatch, {("netsh", "wlan", "show", "wirelesscapabilities"): NETSH_CAPS_ZH})
+    monkeypatch.setattr(wc, "find_npcap", lambda: "")
+    assert any("No Npcap" in n for n in wc.probe_windows().notes)
+
+
+def test_probe_windows_notes_npcap_presence(monkeypatch):
+    _fake_run(monkeypatch, {("netsh", "wlan", "show", "wirelesscapabilities"): NETSH_CAPS_ZH})
+    monkeypatch.setattr(wc, "find_npcap", lambda: r"C:/Windows/System32/Npcap/wpcap.dll")
+    assert any("Support raw 802.11" in n for n in wc.probe_windows().notes)
+
+
+def test_probe_linux_reports_a_missing_iw(monkeypatch):
+    monkeypatch.setattr(wc.shutil, "which", lambda _name: None)
+    report = wc.probe_linux()
+    assert "iw is not installed" in report.error
+    assert report.adapters == []
+
+
+def test_probe_linux_reports_no_interface(monkeypatch):
+    monkeypatch.setattr(wc.shutil, "which", lambda _name: "/usr/bin/iw")
+    _fake_run(monkeypatch, {("iw", "list"): IW_LIST})
+    report = wc.probe_linux()
+    assert "no wireless interface" in report.error
+
+
+def test_probe_linux_reads_modes_and_classifies_the_driver(monkeypatch):
+    monkeypatch.setattr(wc.shutil, "which", lambda _name: "/usr/bin/iw")
+    monkeypatch.setattr(wc, "_linux_driver", lambda _iface: "ath9k")
+    _fake_run(monkeypatch, {("iw", "list"): IW_LIST, ("iw", "dev"): IW_DEV})
+    report = wc.probe_linux()
+    assert report.error == ""
+    adapter = report.adapters[0]
+    assert adapter.name == "wlan0"
+    assert adapter.driver == "ath9k"
+    assert adapter.capabilities["monitor_mode"].value is True
+    assert adapter.verdict is wc.Verdict.INJECTION_CAPABLE
+    assert any("ath9k" in e for e in adapter.evidence)
+
+
+def test_probe_linux_without_monitor_mode_is_firmware_refused(monkeypatch):
+    monkeypatch.setattr(wc.shutil, "which", lambda _name: "/usr/bin/iw")
+    monkeypatch.setattr(wc, "_linux_driver", lambda _iface: "iwlwifi")
+    _fake_run(monkeypatch, {("iw", "list"): IW_LIST_NO_MONITOR, ("iw", "dev"): IW_DEV})
+    assert wc.probe_linux().adapters[0].verdict is wc.Verdict.FIRMWARE_REFUSED
+
+
+def test_probe_dispatches_on_the_platform(monkeypatch):
+    monkeypatch.setattr(wc.sys, "platform", "darwin")
+    assert "unsupported platform" in wc.probe().error
+
+
+def test_linux_unknown_driver_is_passive_only():
+    """The honest tier: a monitor VIF exists, but TX is unproven for this driver."""
+    verdict, detail = wc.classify_linux(True, "rndis_wlan")
+    assert verdict is wc.Verdict.PASSIVE_ONLY
+    assert "not a known injection-capable driver" in detail
+
+
+def test_bool_of_maps_the_unknown_markers_to_none():
+    """netsh reports "unknown"/"unavailable" on some builds; that is not a "supported"."""
+    for marker in ("未知", "值不可用", "n/a", "unknown"):
+        assert wc._bool_of(marker) is None
+
+
+def test_kv_splits_on_a_full_width_colon():
+    """A Chinese netsh build pads and delimiters with the full-width colon."""
+    assert wc._kv("混杂模式：不支持") == ("混杂模式", "不支持")
