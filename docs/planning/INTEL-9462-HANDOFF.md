@@ -24,7 +24,7 @@
 | 驱动 | `Netwtw10.sys`（Intel 闭源），INF `oem243.inf`，段名 `Install_GEN_QSR_JfP1_9462_AC_no_160_1x1_WinT` | `Win32_PnPSignedDriver` |
 | 固件 | `D4.DF`；WDI(Win) 0.1.1.10 / WDI(IHV) 0.1.1.12 | `netsh wlan show wirelesscapabilities` |
 | 空间流 | Tx 1 / Rx 1，1x1 80MHz | 同上 |
-| 当前连接 | SSID `Enhua_a`，信道 149，802.11ac，CCMP | `netsh wlan show interfaces` |
+| 当前连接 | SSID `<已脱敏>`，信道 149，802.11ac，CCMP | `netsh wlan show interfaces` |
 
 ### 2.1 致命约束：固件层直接否决注入
 
